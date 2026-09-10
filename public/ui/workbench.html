@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self'; frame-src http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:*; object-src 'none'; base-uri 'none'">
+  <title>ChatGPT Local Coder · Workbench</title>
+  <link rel="stylesheet" href="workbench-app.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="workbench.html" aria-label="ChatGPT Local Coder">
+        <span class="brand-mark">◇</span>
+        <span class="brand-copy"><strong>ChatGPT Local Coder</strong><small>Local AI coding workspace</small></span>
+      </a>
+
+      <button id="context-button" class="context-card" type="button" aria-haspopup="dialog">
+        <span class="context-icon">▣</span>
+        <span class="context-copy">
+          <small>Workspace</small>
+          <span class="context-title-line">
+            <strong id="workspace-name">Chưa kết nối</strong>
+            <span class="context-separator">/</span>
+            <strong id="task-name" class="context-task-name">No task</strong>
+          </span>
+          <span id="workspace-path">—</span>
+        </span>
+        <span class="context-right">
+          <span id="workspace-state" class="workspace-state"><i class="dot"></i>Ready</span>
+          <span class="context-chevron">⌄</span>
+        </span>
+      </button>
+
+      <div class="top-meta branch-meta">
+        <small>Branch</small>
+        <strong id="branch-name">—</strong>
+        <span id="branch-meta">—</span>
+      </div>
+
+      <button id="policy-button" class="policy-button" type="button">Ask</button>
+
+      <button id="mcp-button" class="mcp-state mcp-link" type="button" title="Open MCP settings">
+        <span>MCP</span><i id="mcp-dot" class="dot muted-dot"></i><strong id="mcp-state">Offline</strong>
+      </button>
+
+      <button id="review-button" class="review-button" type="button" disabled>Review 0 changes</button>
+      <button id="settings-button" class="icon-button" type="button" title="Settings" aria-label="Settings">⚙</button>
+    </header>
+
+    <main class="workspace-layout">
+      <aside class="left-rail">
+        <section class="rail-section explorer-section">
+          <div class="section-head">
+            <strong>EXPLORER</strong>
+            <div class="section-actions">
+              <button id="search-toggle" class="icon-button small" type="button" title="Search">⌕</button>
+              <button id="tree-refresh" class="icon-button small" type="button" title="Refresh explorer">↻</button>
+            </div>
+          </div>
+
+          <div id="search-panel" class="search-panel" hidden>
+            <input id="search-query" type="search" placeholder="Search workspace…" autocomplete="off">
+            <div id="search-results" class="search-results"></div>
+          </div>
+
+          <div class="explorer-root">
+            <button id="tree-up" class="tree-up" type="button" disabled>‹</button>
+            <span class="folder-icon">▾</span>
+            <strong id="explorer-root-name">Workspace</strong>
+            <span id="tree-path" class="tree-path">.</span>
+          </div>
+          <div id="file-tree" class="file-tree" aria-live="polite">
+            <p class="empty-copy">Kết nối để đọc workspace.</p>
+          </div>
+        </section>
+
+        <section class="rail-section agents-section">
+          <div class="section-head agents-head">
+            <strong><span class="live-dot"></span>ACTIVE AGENTS</strong>
+            <span id="agent-count" class="count-pill">0 active</span>
+          </div>
+          <div class="agent-columns" aria-hidden="true">
+            <span>Agent</span><span>Status</span><span>Task</span><span>Branch</span>
+          </div>
+          <div id="agent-list" class="agent-list">
+            <p class="empty-copy">Chưa có MCP session đang hoạt động.</p>
+          </div>
+        </section>
+      </aside>
+
+      <section class="editor-stage">
+        <div class="editor-tabs-row">
+          <div id="editor-tabs" class="editor-tabs"></div>
+          <div class="editor-actions">
+            <button id="save-editor" class="secondary-button compact-action editor-save" type="button" title="Save current file (Ctrl+S)" disabled>Save</button>
+            <button id="reload-editor" class="icon-button small" type="button" title="Reload current file">↻</button>
+          </div>
+        </div>
+        <div class="editor-toolbar">
+          <div id="editor-breadcrumb" class="breadcrumb">Workspace</div>
+          <div class="editor-meta"><span id="editor-kind">FILE</span><span id="editor-meta">—</span></div>
+        </div>
+        <div id="editor-empty" class="editor-empty">
+          <div class="empty-mark">◇</div>
+          <strong>Chọn một file hoặc change để bắt đầu</strong>
+          <span>Explorer mở file. Changes mở diff ngay trong vùng này.</span>
+        </div>
+        <div id="code-view" class="code-view" hidden></div>
+        <div id="diff-view" class="diff-view" hidden></div>
+        <section id="terminal-panel" class="terminal-panel">
+          <div class="terminal-head">
+            <div class="terminal-title"><strong>TERMINAL</strong><span id="terminal-process-count">0 jobs</span><span id="terminal-state">Ready</span></div>
+            <div class="terminal-actions">
+              <select id="terminal-process-select" aria-label="Background process"><option value="">No process</option></select>
+              <span id="terminal-new-lines" class="terminal-new-lines" hidden>0 new</span>
+              <label class="terminal-follow"><input id="terminal-follow" type="checkbox" checked>Follow</label>
+              <button id="terminal-pause" class="mini-action" type="button">Pause</button>
+              <button id="terminal-latest" class="mini-action" type="button">Latest</button>
+              <button id="terminal-stop" class="mini-action danger-mini" type="button" disabled>Stop</button>
+              <button id="terminal-toggle" class="icon-button small" type="button" title="Collapse terminal">⌄</button>
+            </div>
+          </div>
+          <pre id="terminal-output" class="terminal-output" aria-live="polite">No process selected.</pre>
+          <form id="terminal-command-form" class="terminal-command-form">
+            <span class="terminal-prompt">›</span>
+            <input id="terminal-command" type="text" autocomplete="off" spellcheck="false" placeholder="Run a command in this task workspace…">
+            <button id="terminal-run" class="secondary-button compact-action" type="submit">Run</button>
+            <button id="terminal-start" class="primary-button compact-action" type="button">Start background</button>
+          </form>
+        </section>
+      </section>
+
+      <aside class="changes-rail">
+        <div class="changes-tabs">
+          <button class="changes-tab active" data-tab="changes" type="button">Changes <span id="change-count">0</span></button>
+          <button class="changes-tab" data-tab="approvals" type="button">Approvals <span id="approval-count">0</span></button>
+          <button class="changes-tab" data-tab="history" type="button">History <span id="history-count">0</span></button>
+        </div>
+
+        <section id="changes-panel" class="changes-panel">
+          <div class="changes-summary">
+            <div><strong id="change-summary-title">No changes</strong><span id="change-summary-sub">Working tree clean</span></div>
+            <button id="refresh-changes" class="icon-button small" type="button" title="Refresh changes">↻</button>
+          </div>
+          <div id="change-filters" class="change-filters">
+            <button class="filter-chip active" data-filter="all" type="button">All <span id="filter-all-count">0</span></button>
+            <button class="filter-chip" data-filter="unstaged" type="button">Modified <span id="filter-modified-count">0</span></button>
+            <button class="filter-chip" data-filter="staged" type="button">Staged <span id="filter-staged-count">0</span></button>
+            <button class="filter-chip" data-filter="untracked" type="button">Added <span id="filter-added-count">0</span></button>
+            <label class="agent-change-filter">Agent
+              <select id="agent-change-filter" aria-label="Filter changes by agent"><option value="all">All agents</option></select>
+            </label>
+          </div>
+          <div class="source-control-actions">
+            <button id="stage-all" class="secondary-button compact-action" type="button" disabled>Stage all</button>
+            <button id="unstage-all" class="secondary-button compact-action" type="button" disabled>Unstage all</button>
+          </div>
+          <div id="changes-list" class="changes-list">
+            <p class="empty-copy">Không có thay đổi.</p>
+          </div>
+          <form id="commit-form" class="commit-form">
+            <input id="commit-message" type="text" maxlength="500" placeholder="Commit message" disabled>
+            <button id="commit-button" class="primary-button" type="submit" disabled>Commit staged</button>
+          </form>
+        </section>
+
+        <section id="approvals-panel" class="approvals-panel" hidden>
+          <div class="changes-summary">
+            <div><strong>Approval queue</strong><span>Thao tác đang chờ bạn duyệt</span></div>
+          </div>
+          <div id="approvals-list" class="approvals-list">
+            <p class="empty-copy">Không có thao tác chờ duyệt.</p>
+          </div>
+        </section>
+
+        <section id="history-panel" class="history-panel" hidden>
+          <div class="changes-summary">
+            <div><strong>Task history</strong><span>Checkpoint và operation journal</span></div>
+            <button id="create-checkpoint-inline" class="secondary-button compact-action" type="button">+ Checkpoint</button>
+          </div>
+          <div class="history-group-head"><strong>CHECKPOINTS</strong><span id="checkpoint-count">0</span></div>
+          <div id="checkpoint-list" class="history-list"><p class="empty-copy">Chưa có checkpoint.</p></div>
+          <div class="history-group-head"><strong>OPERATIONS</strong><span>Undo / Redo</span></div>
+          <div id="operation-history" class="history-list"><p class="empty-copy">Chưa có operation.</p></div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <span id="status-workspace"><i class="dot"></i>Workspace ready</span>
+      <span id="status-path">—</span>
+      <span id="status-agents">0 agents active</span>
+      <span id="status-mcp"><i class="dot muted-dot"></i>MCP offline</span>
+      <span id="status-changes">0 changes</span>
+      <span id="status-message" class="status-message">Ready</span>
+    </footer>
+  </div>
+
+  <div id="connect-overlay" class="connect-overlay">
+    <form id="connect-form" class="connect-card">
+      <div class="connect-mark">◇</div>
+      <h1>ChatGPT Local Coder</h1>
+      <p>Nhập admin token để mở local Workbench.</p>
+      <label>Admin token<input id="token" type="password" autocomplete="current-password" placeholder="credentials.json token"></label>
+      <button id="connect" class="primary-button" type="submit">Connect</button>
+      <p id="connection-error" class="error-copy" hidden></p>
+    </form>
+  </div>
+
+  <dialog id="context-dialog" class="app-dialog context-dialog">
+    <div class="dialog-head"><div><small>WORKSPACE CONTEXT</small><h2>Workspace & tasks</h2></div><button class="icon-button" data-close-dialog="context-dialog" type="button">×</button></div>
+    <div class="dialog-body context-dialog-body">
+      <section class="context-workspace-summary">
+        <div class="context-summary-icon">▣</div>
+        <div class="context-summary-copy"><small>CURRENT WORKSPACE</small><strong id="context-workspace-name">—</strong><code id="context-workspace-path">—</code></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>TASKS IN THIS WORKSPACE</strong><button id="new-task-button" class="mini-action" type="button">+ New task</button></div>
+        <div id="context-task-list" class="context-list"><p class="empty-copy">No tasks.</p></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>WORKSPACES</strong><button id="add-workspace-button" class="mini-action" type="button">+ Add workspace</button></div>
+        <div id="context-workspace-list" class="context-list"><p class="empty-copy">No workspaces yet.</p></div>
+      </section>
+      <div class="context-footer-actions">
+        <button id="context-open-settings" class="secondary-button" type="button">Workspace settings</button>
+        <button id="context-open-system" class="secondary-button" type="button">System settings</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="add-workspace-dialog" class="app-dialog workspace-dialog">
+    <div class="dialog-head workspace-dialog-head">
+      <div class="workspace-dialog-title">
+        <div class="workspace-dialog-mark">▱</div>
+        <div><small>WORKSPACE</small><h2>Add project folder</h2><p>Open another local project in this Workbench.</p></div>
+      </div>
+      <button class="icon-button workspace-dialog-close" data-close-dialog="add-workspace-dialog" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body workspace-add-body">
+      <section class="workspace-picker-card">
+        <div class="workspace-field-copy"><strong>Project folder</strong><span>Choose the folder ChatGPT should work inside.</span></div>
+        <div class="folder-path-row">
+          <div class="folder-path-input"><span>⌁</span><input id="add-workspace-path" type="text" spellcheck="false" placeholder="D:\Projects\my-app"></div>
+          <button id="browse-workspace" class="workspace-browse-button" type="button">Browse folders</button>
+        </div>
+        <section id="folder-browser" class="folder-browser" hidden>
+          <div class="folder-browser-head">
+            <button id="folder-browser-up" class="folder-nav-button" type="button" aria-label="Parent folder">←</button>
+            <code id="folder-browser-path">Computer</code>
+            <button id="use-current-folder" class="folder-use-button" type="button">Use folder</button>
+          </div>
+          <div id="folder-browser-list" class="folder-browser-list"><p class="empty-copy">Choose a drive or folder.</p></div>
+        </section>
+      </section>
+      <label class="workspace-name-field">
+        <span><strong>Workspace name</strong><small>Optional · shown in the Workbench switcher</small></span>
+        <input id="add-workspace-name" type="text" maxlength="120" placeholder="my-app">
+      </label>
+      <div class="workspace-safety-note"><span>i</span><p>This only registers the folder in Local Coder. Your project files are not moved or deleted.</p></div>
+      <p id="add-workspace-error" class="error-copy workspace-add-error" hidden></p>
+    </div>
+    <div class="dialog-actions workspace-dialog-actions"><button class="secondary-button" data-close-dialog="add-workspace-dialog" type="button">Cancel</button><button id="create-workspace" class="primary-button" type="button">Add workspace</button></div>
+  </dialog>
+
+  <dialog id="new-task-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>NEW TASK</small><h2>What are you working on?</h2></div><button class="icon-button" data-close-dialog="new-task-dialog" type="button">×</button></div>
+    <div class="dialog-body task-create-body">
+      <label class="field-label">Task name<input id="new-task-title" type="text" maxlength="200" placeholder="Refactor authentication"></label>
+      <section id="new-task-workspace-summary" class="task-workspace-summary">
+        <small>Workspace</small>
+        <strong id="new-task-workspace-name">—</strong>
+        <code id="new-task-workspace-path">—</code>
+      </section>
+      <label id="new-task-workspace-field" class="field-label" hidden>Workspace path<input id="new-task-workspace" type="text" placeholder="D:\Projects\my-app"></label>
+      <p class="form-help">A task is the work you are doing inside this workspace. Permissions are managed separately.</p>
+      <div class="dialog-actions"><button class="secondary-button" data-close-dialog="new-task-dialog" type="button">Cancel</button><button id="create-task" class="primary-button" type="button">Create task</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="permissions-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>ACCESS</small><h2>Permissions</h2></div><button class="icon-button" data-close-dialog="permissions-dialog" type="button">×</button></div>
+    <div class="dialog-body permissions-body">
+      <div class="permission-workspace"><small>Applies to</small><strong id="permission-workspace-name">—</strong><code id="permission-workspace-path">—</code></div>
+      <fieldset class="permission-options">
+        <legend>Permission mode</legend>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="ask"><span><strong>Ask before changes</strong><small>Review write and command actions before they run.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="auto"><span><strong>Auto</strong><small>Allow safe edits automatically and ask for higher-risk actions.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="full"><span><strong>Full access</strong><small>Allow this task to edit files and run commands without approval prompts.</small></span></label>
+      </fieldset>
+      <label class="toggle-row human-toggle"><input id="policy-scope" type="checkbox" checked><span><strong>Restrict access to this workspace</strong><small id="policy-scope-help">ChatGPT can only access files inside this workspace.</small></span></label>
+      <div class="dialog-actions"><button class="secondary-button" data-close-dialog="permissions-dialog" type="button">Cancel</button><button id="save-policy" class="primary-button" type="button">Save permissions</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="workspace-settings-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>WORKSPACE</small><h2>Workspace settings</h2></div><button class="icon-button" data-close-dialog="workspace-settings-dialog" type="button">×</button></div>
+    <div class="dialog-body workspace-settings-body">
+      <section class="workspace-settings-summary"><small>Workspace</small><strong id="settings-workspace-name">—</strong><code id="settings-workspace-path">—</code></section>
+      <button id="workspace-settings-permissions" class="settings-row-button" type="button"><span><strong>Permissions</strong><small id="settings-permission-summary">—</small></span><span>›</span></button>
+      <button id="workspace-settings-mcp" class="settings-row-button" type="button"><span><strong>MCP</strong><small id="settings-mcp-summary">Connection and server settings</small></span><span>›</span></button>
+      <button id="workspace-settings-system" class="settings-row-button" type="button"><span><strong>System</strong><small>Environment, project context and diagnostics</small></span><span>›</span></button>
+    </div>
+  </dialog>
+
+  <dialog id="mcp-dialog" class="app-dialog context-dialog">
+    <div class="dialog-head"><div><small>LOCAL CODER</small><h2>MCP settings</h2></div><button class="icon-button" data-close-dialog="mcp-dialog" type="button">×</button></div>
+    <div class="dialog-body mcp-settings-body">
+      <section class="mcp-summary-grid">
+        <div class="mcp-summary-card"><small>MCP server</small><strong id="mcp-dialog-server">—</strong><span id="mcp-dialog-sessions">—</span></div>
+        <div class="mcp-summary-card"><small>Public connection</small><strong id="mcp-dialog-public">Local only</strong><span id="mcp-dialog-profile">—</span></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>UPSTREAM MCP SERVERS</strong><span id="mcp-upstream-count">0</span></div>
+        <div class="mcp-section-actions">
+          <button id="mcp-add-server" class="secondary-button compact-action" type="button">Add server</button>
+          <button id="mcp-open-import" class="secondary-button compact-action" type="button">Import</button>
+        </div>
+        <div id="mcp-upstream-list" class="mcp-upstream-list"><p class="empty-copy">No upstream servers configured.</p></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>PROJECT CONTEXT</strong></div>
+        <div class="mcp-detail-row"><span>Workspace</span><code id="mcp-dialog-workspace">—</code></div>
+        <div class="mcp-detail-row"><span>Instructions</span><strong id="mcp-dialog-instructions">—</strong></div>
+      </section>
+      <p class="form-help">MCP status, upstream servers and import are managed directly in Workbench.</p>
+      <div class="context-footer-actions"><button id="refresh-mcp-settings" class="secondary-button" type="button">Refresh</button><button id="mcp-open-system" class="secondary-button" type="button">System settings</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="mcp-server-dialog" class="app-dialog context-dialog">
+    <div class="dialog-head"><div><small>UPSTREAM MCP</small><h2 id="mcp-server-dialog-title">Add server</h2></div><button class="icon-button" data-close-dialog="mcp-server-dialog" type="button">×</button></div>
+    <div class="dialog-body mcp-server-form">
+      <div class="mcp-form-grid">
+        <label class="field-label">ID<input id="mcp-server-id" type="text" placeholder="my-server"></label>
+        <label class="field-label">Display name<input id="mcp-server-name" type="text" placeholder="My MCP server"></label>
+        <label class="field-label">Transport<select id="mcp-server-transport"><option value="stdio">stdio</option><option value="http">http</option></select></label>
+        <label class="field-label">Expose<select id="mcp-server-expose"><option value="meta_only">meta_only</option><option value="allowlist">allowlist</option><option value="all">all</option><option value="none">none</option></select></label>
+        <label id="mcp-command-field" class="field-label mcp-span-2">Command<input id="mcp-server-command" type="text" placeholder="node"></label>
+        <label id="mcp-args-field" class="field-label mcp-span-2">Args (JSON array)<input id="mcp-server-args" type="text" placeholder='["server.js"]'></label>
+        <label id="mcp-cwd-field" class="field-label mcp-span-2">Working directory<input id="mcp-server-cwd" type="text" placeholder="D:\\path\\to\\server"></label>
+        <label id="mcp-url-field" class="field-label mcp-span-2" hidden>URL<input id="mcp-server-url" type="text" placeholder="http://127.0.0.1:3100/mcp"></label>
+        <label class="field-label">Tool prefix<input id="mcp-server-prefix" type="text" placeholder="my_server"></label>
+        <label class="field-label">Idle timeout (s)<input id="mcp-server-timeout" type="number" min="1" value="600"></label>
+        <label class="field-label mcp-span-2">Allowlist (comma separated)<input id="mcp-server-tools" type="text" placeholder="tool_a, tool_b"></label>
+      </div>
+      <label class="toggle-row human-toggle"><input id="mcp-server-enabled" type="checkbox" checked><span><strong>Enabled</strong><small>Connect to this upstream server when needed.</small></span></label>
+      <p id="mcp-server-error" class="error-copy" hidden></p>
+      <div class="dialog-actions"><button class="secondary-button" data-close-dialog="mcp-server-dialog" type="button">Cancel</button><button id="mcp-save-server" class="primary-button" type="button">Save server</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="mcp-import-dialog" class="app-dialog context-dialog">
+    <div class="dialog-head"><div><small>IMPORT MCP</small><h2>Import servers</h2></div><button class="icon-button" data-close-dialog="mcp-import-dialog" type="button">×</button></div>
+    <div class="dialog-body mcp-settings-body">
+      <section class="context-section">
+        <div class="context-section-head"><strong>DISCOVERED CONFIGS</strong><button id="mcp-refresh-import" class="mini-action" type="button">Refresh</button></div>
+        <div id="mcp-import-list" class="mcp-import-list"><p class="empty-copy">Scanning local MCP configs…</p></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>IMPORT FILE</strong></div>
+        <label class="field-label">Config path<input id="mcp-import-path" type="text" placeholder="C:\\path\\to\\mcp.json"></label>
+        <label class="field-label">Format<select id="mcp-import-source"><option value="cursor">Cursor / mcpServers</option><option value="claude">Claude Code / Desktop</option><option value="opencode">OpenCode</option></select></label>
+        <button id="mcp-import-file" class="primary-button" type="button">Import file</button>
+      </section>
+      <p id="mcp-import-result" class="form-help"></p>
+    </div>
+  </dialog>
+
+  <dialog id="system-dialog" class="app-dialog system-dialog">
+    <div class="dialog-head"><div><small>LOCAL CODER</small><h2>System settings</h2></div><button class="icon-button" data-close-dialog="system-dialog" type="button">×</button></div>
+    <div class="dialog-body system-settings-body">
+      <section class="context-section">
+        <div class="context-section-head"><strong>ENVIRONMENT (.ENV)</strong><span id="system-env-path">—</span></div>
+        <div id="system-env-grid" class="system-env-grid"></div>
+        <div class="system-actions"><span class="form-help">Some values require a server restart to fully apply.</span><button id="save-system-env" class="primary-button" type="button">Save environment</button></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>PROJECT CONTEXT</strong><span id="system-context-meta">—</span></div>
+        <pre id="system-context-preview" class="system-code-block">Loading…</pre>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>CONNECTOR APPROVALS</strong><span id="oauth-request-count">0 pending</span></div>
+        <div id="oauth-request-list" class="oauth-request-list"><p class="empty-copy">No pending connector requests.</p></div>
+      </section>
+      <section class="context-section">
+        <div class="context-section-head"><strong>RUNTIME DIAGNOSTICS</strong><button id="refresh-system" class="mini-action" type="button">Refresh</button></div>
+        <pre id="system-health-preview" class="system-code-block">Loading…</pre>
+      </section>
+      <p id="system-error" class="error-copy" hidden></p>
+    </div>
+  </dialog>
+
+  <dialog id="review-dialog" class="app-dialog review-dialog">
+    <div class="dialog-head"><div><small>PATCH REVIEW</small><h2 id="review-title">Review operation</h2></div><button class="icon-button" data-close-dialog="review-dialog" type="button">×</button></div>
+    <div class="dialog-body">
+      <p id="review-note" class="dialog-note review-note"></p>
+      <p id="review-error" class="error-copy" hidden></p>
+      <div id="review-files" class="review-files"></div>
+    </div>
+    <div id="review-actions" class="dialog-actions" hidden>
+      <button id="deny-operation" class="danger-button" type="button">Deny</button>
+      <button id="approve-operation" class="primary-button" type="button">Approve once</button>
+    </div>
+  </dialog>
+
+  <dialog id="checkpoint-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>CHECKPOINT PREVIEW</small><h2 id="checkpoint-title">Checkpoint</h2></div><button class="icon-button" data-close-dialog="checkpoint-dialog" type="button">×</button></div>
+    <div class="dialog-body">
+      <p id="checkpoint-note" class="dialog-note"></p>
+      <p id="checkpoint-error" class="error-copy" hidden></p>
+      <div id="checkpoint-files" class="checkpoint-files"></div>
+      <div id="checkpoint-effects" class="checkpoint-effects"></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="secondary-button" data-close-dialog="checkpoint-dialog" type="button">Cancel</button>
+      <button id="restore-checkpoint" class="danger-button" type="button">Restore checkpoint</button>
+    </div>
+  </dialog>
+
+  <dialog id="agent-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>ACTIVE AGENT</small><h2 id="agent-dialog-title">ChatGPT session</h2></div><button class="icon-button" data-close-dialog="agent-dialog" type="button">×</button></div>
+    <div class="dialog-body">
+      <div class="agent-detail-grid">
+        <span>Status</span><strong id="agent-detail-status">—</strong>
+        <span>Task</span><strong id="agent-detail-task">—</strong>
+        <span>Branch</span><strong id="agent-detail-branch">—</strong>
+        <span>Workspace</span><code id="agent-detail-workspace">—</code>
+        <span>Client</span><strong id="agent-detail-client">—</strong>
+        <span>Session</span><code id="agent-detail-session">—</code>
+        <span>Last activity</span><strong id="agent-detail-last">—</strong>
+      </div>
+      <div class="history-group-head agent-ops-head"><strong>RECENT OPERATIONS</strong><span id="agent-operation-count">0</span></div>
+      <div id="agent-operation-list" class="history-list"><p class="empty-copy">Chưa có operation.</p></div>
+      <div class="history-group-head agent-activity-head"><strong>RECENT ACTIVITY</strong><span id="agent-activity-count">0</span></div>
+      <div id="agent-activity-list" class="agent-activity-list"><p class="empty-copy">Chưa có activity.</p></div>
+    </div>
+    <div class="dialog-actions">
+      <button id="agent-review-current" class="secondary-button" type="button" hidden>Review pending operation</button>
+      <button id="agent-filter-changes" class="secondary-button" type="button">Show changes</button>
+      <button id="agent-open-task" class="primary-button" type="button">Open task</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="workbench/app.js"></script>
+</body>
+</html>

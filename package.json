@@ -1,0 +1,59 @@
+{
+  "name": "chatgpt-local-coder",
+  "version": "1.0.0",
+  "description": "Turn ChatGPT web into a local coding agent via MCP — files, shell, git, apply_patch, 40+ tools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hoangcoderr/chatgpt-local-coder.git"
+  },
+  "homepage": "https://github.com/hoangcoderr/chatgpt-local-coder#readme",
+  "bugs": {
+    "url": "https://github.com/hoangcoderr/chatgpt-local-coder/issues"
+  },
+  "author": "hoangcoderr",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "codex-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node scripts/test-sandbox.mjs && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-workbench.mjs",
+    "test:workbench": "npm run build && node scripts/test-workbench.mjs",
+    "test:chatgpt": "npm run build && node scripts/test-chatgpt-web.mjs",
+    "test:all": "node scripts/run-all-tests.mjs",
+    "test:integration": "npm run build && node scripts/test-mcp-bridge-integration.mjs",
+    "init-claude-md": "node scripts/init-claude-md.mjs",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "tunnel": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tunnel.ps1"
+  },
+  "keywords": [
+    "mcp",
+    "chatgpt",
+    "coding-agent",
+    "model-context-protocol",
+    "local-development",
+    "filesystem",
+    "git",
+    "apply-patch",
+    "developer-mode",
+    "openai-tunnel"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "monaco-editor": "^0.56.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

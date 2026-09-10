@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "hooks": [
+    {
+      "glob": "*.php",
+      "command": "php -l \"{path}\"",
+      "timeout_ms": 10000
+    },
+    {
+      "glob": "*.ts",
+      "command": "node --check \"{path}\"",
+      "timeout_ms": 10000
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+Local coding tools optimized for ChatGPT web. Select this connector for local project work.
+
+Workflow: inspect_code (batch reads/searches with rules) → apply_patch (multiple files) → start_process (tests/build).
+If a job is running, use process_output with its returned cursor and wait_ms=10000. Do not repeat unchanged log polls.
+Project memory from CLAUDE.md is auto-loaded from WORKSPACE_PATH.
+
+First message tip: include project path if not default cwd.
