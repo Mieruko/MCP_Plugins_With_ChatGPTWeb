@@ -1,6 +1,6 @@
 # Local Coder Workbench — implementation and setup
 
-This branch is an initial implementation of the researched design. It does not yet provide complete Codex parity.
+This branch implements a local coding-agent control plane around the MCP server. It does not provide complete Codex/IDE parity, but the Workbench now exposes real task-scoped project browsing, search, process management, review, Git controls, checkpoints, preview and session/runtime state rather than dashboard-only placeholders.
 
 ## Separate main and development
 
@@ -54,7 +54,9 @@ The GitHub tool supports issue list/view, PR list/view/checks, creating a draft 
 | Approve for me | Deterministic rules auto-approve supported file edits. Git/remote mutations and arbitrary commands still require local approval. |
 | Full | No server approval prompts. Workspace scope can still be enabled as a custom configuration. |
 
-The **workspace-only** checkbox is independent from the approval reviewer. It validates canonical paths, nonexistent destinations through their nearest existing ancestor, junctions and hard links. File operations are bounded to the task workspace; the control store is inaccessible through file tools. Process execution and upstream tools are refused while this boundary is enabled because there is no OS process sandbox yet. Post-edit hooks do not run implicitly after an approved file edit.
+The **workspace-only** checkbox is independent from the approval reviewer. It validates canonical paths, nonexistent destinations through their nearest existing ancestor, junctions and hard links. File operations are bounded to the task workspace; the control store is inaccessible through file tools. Process execution is fail-closed unless an OS sandbox provider is explicitly configured and healthy. The first provider is Docker: shell and supported local Git commands run in a short-lived container with only the task workspace bind-mounted read/write, `network=none`, dropped Linux capabilities, `no-new-privileges`, a read-only root filesystem, non-root user and CPU/memory/PID limits. GitHub, upstream MCP calls, remote Git and Preview start still require machine scope. Post-edit hooks do not run implicitly after an approved file edit.
+
+Docker sandboxing is opt-in. Install Docker Desktop / Docker Engine, pull the configured image yourself, then set `WORKBENCH_SANDBOX_PROVIDER=docker`. The server intentionally does **not** pull images automatically. The active Docker endpoint must be local (`unix://` or Windows `npipe://`); inherited `DOCKER_HOST` / `DOCKER_CONTEXT` overrides are stripped and remote Docker endpoints are rejected. The default image is `node:22-bookworm`; change `WORKBENCH_SANDBOX_IMAGE` when the project needs another toolchain. Workspace-only shell commands run through POSIX `sh` inside that image, not the host PowerShell. `WORKBENCH_SANDBOX_USER` must be non-root; memory, CPU and PID limits are configurable in `.env.example`.
 
 Changing policy invalidates pending approvals. An approval expires after 15 minutes, binds to a stored tool request, and executes at most once. File changes while waiting cause `APPROVAL_CONFLICT`. Git mutation approvals fingerprint HEAD, index, tracked working changes and local configuration so a different staged version is not accidentally committed. This does not sandbox arbitrary shell commands or undo their side effects.
 
@@ -66,18 +68,37 @@ Create/select tasks in the dashboard. The selected default applies to newly esta
 
 Initialization loads only the selected task's workspace instructions, and binds the session before its first tool call. Known session-to-task mappings are persisted so recovery after a server restart retains the original task even when the selected default changes. A completely new or unknown session uses the selected default.
 
-File tool checkpoints feed a before/after task journal. Review shows the actual snapshots, independently of Git's index or HEAD. Undo/Redo work per operation or per file. All affected paths are checked before an Undo starts; user modifications cause `UNDO_CONFLICT` and are retained. Changes made before the task are preserved in the recorded baseline.
+File tool checkpoints feed a before/after task journal. Pending supported file mutations also receive an in-memory preflight diff before approval; the operation list carries only summary metadata while the local review endpoint returns the full diff. Approval remains bound to the original snapshot, so a concurrent file change still causes `APPROVAL_CONFLICT`.
 
-Git controls cover status, diff/staged diff, explicit staging, unstage, commit, branch/worktree creation, fetch and push. Commit defaults to **already staged files**, never `git add -A`. Push requires an explicit branch. Pull is fast-forward-only. Worktree creation provides a separate checkout; ordinary branch switching does not isolate uncommitted changes.
+Review shows the actual snapshots independently of Git's index or HEAD. Undo/Redo work per operation or per file. All affected paths are checked before an Undo starts; user modifications cause `UNDO_CONFLICT` and are retained. Changes made before the task are preserved in the recorded baseline.
+
+Task checkpoints are journal boundaries and are now the canonical restore model for both Workbench History and the compatibility `rewind` tool. A checkpoint preview computes every file that would change and refuses the whole restore if any recorded state no longer matches (`CHECKPOINT_CONFLICT`). Restoring an older checkpoint marks the affected journal changes undone and discards later checkpoints on that task timeline. Shell, Git and remote operations after the checkpoint are reported separately as external side effects and are never claimed to be rolled back. The older standalone snapshot store remains only for direct/non-Workbench compatibility and is not populated during normal task-scoped MCP operations.
+
+Git controls cover structured branch/ahead/behind status, staged/modified/untracked file groups, per-file working/staged diff, explicit file staging/unstaging, commit, branch/worktree creation, fetch and push. Commit defaults to **already staged files**, never `git add -A`. Push requires an explicit branch. Pull is fast-forward-only. Worktree creation provides a separate checkout; ordinary branch switching does not isolate uncommitted changes.
 
 State is written before file edits and after each restore step. A failed multi-file operation can have partial changes, and these remain reviewable. File contents and modes are captured, not Windows ACLs or all filesystem metadata. Large trees/files are rejected rather than silently skipped (2000 paths / 32 MiB per capture).
 
+## Workbench project/runtime panels
+
+The dashboard reuses the same tool handlers and Workbench dispatcher used by MCP sessions instead of implementing a second filesystem or command runner:
+
+- **Project Explorer** lists task-workspace directories and previews text files through `list_directory` / `read_text_file` with the normal canonical-path checks.
+- **Workspace Search** exposes task-scoped `grep` and `glob`; glob results can open directly in the file viewer.
+- **Project Context** loads the selected task's `AGENTS.md`, `CLAUDE.md`, `README.md` and supported rule/config context through `project_context`.
+- **Shell / Processes** runs foreground commands and starts, tails, lists and stops background processes using the normal command policy. Process records are task-scoped. In workspace-only mode these process tools use the configured Docker sandbox; if Docker/the image is unavailable they fail with `SANDBOX_UNAVAILABLE` instead of falling back to the host.
+- **Project Preview** stores a task-local dev command and loopback URL, starts the dev server through `start_process`, displays its output, and embeds only `localhost` / `127.0.0.1` HTTP(S) URLs. Preview start remains machine-scope-only because the secure workspace sandbox deliberately uses `network=none` and exposes no host-reachable port.
+- **MCP Sessions / Runtime** shows active session ID, bound task/workspace, client name/version and last activity. New sessions bind to the currently selected default task; existing sessions stay pinned.
+- **Activity** can be filtered by task because tool events carry `task_id` and `operation_id` when available.
+
+On Windows, stopping a managed process terminates the PowerShell process tree rather than only the shell wrapper. Server `SIGINT` and `SIGTERM` shutdown also terminate managed background process trees before exit. This prevents stopped previews/dev servers from being orphaned and continuing to hold the workspace open.
+
 ## Limitations
 
-- **No OS process sandbox.** Workspace-only permits supported file tools but blocks shell, Git, GitHub and upstream execution. Native Windows/WSL sandbox support remains a separate milestone. Full mode is not a security boundary against a malicious command running as the same OS user, including access to local credentials/control files.
+- **Docker is the first OS process sandbox provider, not a native Windows sandbox.** Workspace-only can run shell and supported local Git when Docker and the configured image are available; otherwise it remains fail-closed. Native Windows/WSL providers remain future work. Remote Git, GitHub, upstream MCP calls and Preview start stay outside this sandbox by design. Full/machine scope is not a security boundary against a malicious command running as the same OS user, including access to local credentials/control files.
+- The Docker sandbox protects the host boundary by exposing only the workspace and disabling network, but commands can still freely modify files inside that workspace. The chosen image is part of the trust/configuration boundary and must contain the tools the project needs. Docker Desktop/daemon security itself is outside this application.
 - File validation cannot prevent every race with a concurrently hostile OS process. Avoid concurrent external writers while editing/restoring. Switching policy does not retroactively undo or revoke already-running unrestricted commands.
-- Shell, Git index/history and remote side effects are not automatically snapshotted or undoable. A background process may continue writing after its start operation completes. Git worktrees reduce conflicts but are not sandboxes.
-- Interrupted operations require manual inspection; there is no automatic crash rollback. Undo detects conflicts rather than attempting a three-way merge. Task-wide Undo, staging individual diff hunks, transactional multi-file rollback and snapshot retention management remain to be implemented.
+- Shell, Git index/history and remote side effects are not automatically snapshotted or undoable. A background process can modify files for as long as it is intentionally left running. Git worktrees reduce conflicts but are not sandboxes.
+- Interrupted operations require manual inspection; there is no automatic crash rollback. Undo/checkpoint restore detect conflicts rather than attempting a three-way merge. Staging individual diff hunks, transactional rollback of non-file effects and snapshot retention management remain to be implemented.
 - Review is currently in the **local dashboard**; an inline ChatGPT MCP Apps widget is not yet included.
 - Automatic reviewer rules are intentionally limited. Per-repository/branch remote grants, richer merge-conflict UI, releases and GitHub administration are not implemented.
 - One server process per state directory. No automatic multi-process locking, encrypted snapshot database or per-user accounts. Task shell cwd is isolated in memory and resets to its workspace after restart.
@@ -92,6 +113,6 @@ npm run test:integration
 npm run test:all
 ```
 
-Workbench tests use isolated temporary projects and local mock credentials. They cover OAuth/authorization, pending writes, policy revocation, workspace traversal/junctions, stale file/Git approvals, Undo/Redo conflicts, explicit Git staging, GitHub argument construction, and restart behavior. Existing tests cover MCP SSE/session recovery, batching, cursor logs, checkpoints and upstream tools.
+Workbench tests use isolated temporary projects and local mock credentials. They cover OAuth/authorization, project explorer/search/context, foreground/background commands, process-tree termination, preview lifecycle and URL restrictions, task/session binding, pending preflight diffs, task checkpoints, policy revocation, workspace traversal/junctions, stale file/Git approvals, Undo/Redo conflicts, file-level Git stage/diff/unstage, GitHub argument construction, and restart behavior. `test-sandbox.mjs` additionally verifies fail-closed provider defaults and the Docker run specification (workspace-only bind, network isolation, non-root execution and resource limits) without requiring Docker. A live Docker execution test still requires a machine where Docker and the configured image are installed. Existing tests cover MCP SSE/session recovery, batching, cursor logs, legacy checkpoints and upstream tools.
 
 Browser verification used a disposable local fixture to approve a pending write, view its before/after snapshots, and Undo/Redo one file. To reproduce manually, run `$env:WORKBENCH_UI_PREVIEW_SECONDS='240'; node scripts/test-workbench.mjs` after building; the script prints its temporary URL and fixture token, then stops and removes its temporary project automatically. This is not the production dashboard.
