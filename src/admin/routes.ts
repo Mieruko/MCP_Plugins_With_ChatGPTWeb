@@ -2,6 +2,8 @@ import fs from "fs/promises";
 import path from "path";
 import { Router, type Request, type Response } from "express";
 import type { McpUpstreamManager } from "../lib/mcp-upstream-manager.js";
+import type { McpSessionSummary } from "../lib/mcp-session-manager.js";
+import { getChatGptToolProfile, SLIM_CHATGPT_TOOLS } from "../lib/tool-profile.js";
 import {
   defaultUpstreamConfig,
   discoverMcpConfigs,
@@ -65,6 +67,7 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
   mcpPort: number;
   pid: number;
   sessionCount: () => number;
+  sessionList?: () => McpSessionSummary[];
   instructionSummary?: () => Record<string, unknown>;
   instructionsPreview?: () => string;
 }): Router {
@@ -73,12 +76,19 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
 
   router.get("/health", async (_req: Request, res: Response) => {
     const upstream = await manager.listStatuses();
+    const profile = getChatGptToolProfile();
+    const sessions = options.sessionList?.() ?? [];
     res.json({
       status: "ok",
       name: "codex-mcp-admin",
       pid: options.pid,
       mcp_port: options.mcpPort,
       active_sessions: options.sessionCount(),
+      recoverable_sessions: sessions.length,
+      sessions,
+      tool_profile: profile,
+      core_tools: [...SLIM_CHATGPT_TOOLS],
+      public_base_url: process.env.PUBLIC_BASE_URL || null,
       default_cwd: getDefaultCwd(),
       full_disk_access: getFullDiskAccess(),
       upstream,
@@ -252,9 +262,10 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
 
   function filterActivity(
     entries: ActivityEntry[],
-    opts: { kind?: string; status?: string; tool?: string; q?: string }
+    opts: { kind?: string; status?: string; tool?: string; q?: string; task?: string }
   ): ActivityEntry[] {
     let out = entries;
+    if (opts.task) out = out.filter((e) => e.task_id === opts.task);
     if (opts.kind && opts.kind !== "all") {
       out = out.filter((e) => e.kind === opts.kind);
     }
@@ -286,6 +297,7 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
       status: typeof req.query.status === "string" ? req.query.status : undefined,
       tool: typeof req.query.tool === "string" ? req.query.tool : undefined,
       q: typeof req.query.q === "string" ? req.query.q : undefined,
+      task: typeof req.query.task === "string" ? req.query.task : undefined,
     });
     res.json({ ok: true, entries, count: entries.length });
   });

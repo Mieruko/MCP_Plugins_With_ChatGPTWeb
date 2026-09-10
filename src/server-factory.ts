@@ -41,7 +41,8 @@ export function createMcpServer(
   fullDiskAccess = false,
   upstreamManager?: McpUpstreamManager,
   projectMemoryInstructions?: string,
-  pinnedTaskId?: string
+  pinnedTaskId?: string,
+  pinnedSessionId?: string
 ): McpServer {
   const server = new McpServer(
     {
@@ -63,7 +64,7 @@ export function createMcpServer(
   );
 
   applyToolProfile(server);
-  installWorkbench(server, workspaceRoot, pinnedTaskId);
+  installWorkbench(server, workspaceRoot, pinnedTaskId, pinnedSessionId);
 
   registerFilesystemTools(server);
   registerInspectTools(server, workspaceRoot);

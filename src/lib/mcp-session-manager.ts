@@ -21,6 +21,10 @@ const SESSION_DELETE_GRACE_MS = parseInt(
   process.env.MCP_SESSION_DELETE_GRACE_MS || "45000",
   10
 ); // keep session after DELETE so in-flight tool calls can finish
+const ACTIVE_SESSION_WINDOW_MS = Math.max(
+  1_000,
+  parseInt(process.env.MCP_ACTIVE_SESSION_MS || "60000", 10)
+); // fallback when a client does not keep a GET/SSE stream open
 
 const lastTransportErrors: Record<string, string> = {};
 const sessionOpChains = new Map<string, Promise<void>>();
@@ -28,8 +32,28 @@ const sessionOpChains = new Map<string, Promise<void>>();
 export interface McpSession {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
+  taskId: string;
+  workspace: string;
+  clientInfo?: { name: string; version?: string };
   lastAccessedAt: number;
   createdAt: number;
+  liveConnections: number;
+  inFlightRequests: number;
+  clientClosedAt?: number;
+}
+
+export interface McpSessionSummary {
+  id: string;
+  taskId: string;
+  workspace: string;
+  clientInfo?: { name: string; version?: string };
+  createdAt: string;
+  lastAccessedAt: string;
+  active: boolean;
+  connected: boolean;
+  liveConnections: number;
+  inFlightRequests: number;
+  state: "working" | "connected" | "recent" | "dormant";
 }
 
 export interface SessionManagerConfig {
@@ -44,6 +68,7 @@ export interface SessionManager {
   get(sessionId: string): McpSession | undefined;
   touch(sessionId: string): void;
   count(): number;
+  list(): McpSessionSummary[];
   createNew(req: Request, res: Response, body: unknown): Promise<void>;
   handleExisting(session: McpSession, req: Request, res: Response, body?: unknown): Promise<void>;
   tryRecoverStale(
@@ -64,6 +89,30 @@ function extractRequestId(body: unknown): string | number | null {
   const id = (body as { id?: unknown }).id;
   if (typeof id === "string" || typeof id === "number") return id;
   return null;
+}
+
+function extractClientInfo(body: unknown): { name: string; version?: string } | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const params = (body as { params?: unknown }).params;
+  if (!params || typeof params !== "object") return undefined;
+  const info = (params as { clientInfo?: unknown }).clientInfo;
+  if (!info || typeof info !== "object") return undefined;
+  const name = (info as { name?: unknown }).name;
+  const version = (info as { version?: unknown }).version;
+  if (typeof name !== "string" || !name.trim()) return undefined;
+  return { name: name.trim().slice(0, 120), ...(typeof version === "string" ? { version: version.slice(0, 80) } : {}) };
+}
+
+function isSessionActive(session: McpSession, now = Date.now()): boolean {
+  if (session.inFlightRequests > 0 || session.liveConnections > 0) return true;
+  if (session.clientClosedAt) return false;
+  return now - session.lastAccessedAt <= ACTIVE_SESSION_WINDOW_MS;
+}
+
+function sessionState(session: McpSession, now = Date.now()): McpSessionSummary["state"] {
+  if (session.inFlightRequests > 0) return "working";
+  if (session.liveConnections > 0) return "connected";
+  return isSessionActive(session, now) ? "recent" : "dormant";
 }
 
 async function loopbackMcpPost(
@@ -129,6 +178,45 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     const session = sessions[sessionId];
     if (session) {
       session.lastAccessedAt = Date.now();
+      session.clientClosedAt = undefined;
+    }
+  }
+
+  function markClientClosed(sessionId: string): void {
+    const session = sessions[sessionId];
+    if (!session) return;
+    session.clientClosedAt = Date.now();
+    session.liveConnections = 0;
+  }
+
+  function beginLiveConnection(sessionId: string, res: Response): () => void {
+    const session = sessions[sessionId];
+    if (!session) return () => {};
+    touch(sessionId);
+    session.liveConnections += 1;
+    let ended = false;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      session.liveConnections = Math.max(0, session.liveConnections - 1);
+    };
+    res.once("close", end);
+    res.once("finish", end);
+    return end;
+  }
+
+  async function trackRequest(sessionId: string, op: () => Promise<void>): Promise<void> {
+    const session = sessions[sessionId];
+    if (!session) {
+      await op();
+      return;
+    }
+    touch(sessionId);
+    session.inFlightRequests += 1;
+    try {
+      await op();
+    } finally {
+      session.inFlightRequests = Math.max(0, session.inFlightRequests - 1);
     }
   }
 
@@ -166,13 +254,13 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     delete pendingRecoveries[sessionId];
   }
 
-  async function buildSession(preferredSessionId?: string): Promise<McpSession> {
+  async function buildSession(preferredSessionId?: string, clientInfo?: { name: string; version?: string }): Promise<McpSession> {
     const sessionId = preferredSessionId || randomUUID();
     const taskId = await resolveSessionTask(sessionId, config.workspaceRoot);
     const task = (await getWorkbench()).tasks.find(t => t.id === taskId)!;
     // Bind both initialization memory and tools to the same task. Never send the
     // server's startup project memory to a session selected for another project.
-    const context = await executionContext.run({ taskId, workspace: task.workspace, workspaceOnly: true,
+    const context = await executionContext.run({ taskId, sessionId, workspace: task.workspace, workspaceOnly: true,
       operationId: "initialization", capture: async () => {} }, () => buildInstructionContext({
         workspaceRoot: task.workspace, workspaceRoots: [task.workspace], pid: process.pid,
         adminPort: Number(process.env.ADMIN_PORT || 3001),
@@ -184,7 +272,8 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       !task.policy.workspaceOnly,
       getUpstreamManager(),
       context.instructionsText,
-      taskId
+      taskId,
+      sessionId
     );
 
     const transport = new StreamableHTTPServerTransport({
@@ -192,17 +281,27 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       enableJsonResponse: true,
       onsessioninitialized: (sid) => {
         const existing = sessions[sid];
+        const pending = pendingRecoveries[sid];
         sessions[sid] = {
           transport,
           server: mcpServer,
+          taskId,
+          workspace: task.workspace,
+          clientInfo: pending?.clientInfo ?? existing?.clientInfo ?? clientInfo,
           lastAccessedAt: Date.now(),
           createdAt: existing?.createdAt ?? Date.now(),
+          liveConnections: existing?.liveConnections ?? 0,
+          inFlightRequests: existing?.inFlightRequests ?? 0,
+          clientClosedAt: undefined,
         };
         clearPendingRecovery(sid);
         console.log(`[MCP] Session initialized: ${sid}`);
       },
       onsessionclosed: (sid) => {
-        if (sid) scheduleDeleteGrace(sid);
+        if (sid) {
+          markClientClosed(sid);
+          scheduleDeleteGrace(sid);
+        }
       },
     });
 
@@ -226,8 +325,13 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       sessions[sid] ?? {
         transport,
         server: mcpServer,
+        taskId,
+        workspace: task.workspace,
+        clientInfo,
         lastAccessedAt: Date.now(),
         createdAt: Date.now(),
+        liveConnections: 0,
+        inFlightRequests: 0,
       }
     );
   }
@@ -286,7 +390,27 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     touch,
 
     count() {
-      return Object.keys(sessions).length;
+      const now = Date.now();
+      return Object.values(sessions).filter(session => isSessionActive(session, now)).length;
+    },
+
+    list() {
+      const now = Date.now();
+      return Object.entries(sessions)
+        .map(([id, session]) => ({
+          id,
+          taskId: session.taskId,
+          workspace: session.workspace,
+          clientInfo: session.clientInfo,
+          createdAt: new Date(session.createdAt).toISOString(),
+          lastAccessedAt: new Date(session.lastAccessedAt).toISOString(),
+          active: isSessionActive(session, now),
+          connected: session.liveConnections > 0,
+          liveConnections: session.liveConnections,
+          inFlightRequests: session.inFlightRequests,
+          state: sessionState(session, now),
+        }))
+        .sort((a, b) => b.lastAccessedAt.localeCompare(a.lastAccessedAt));
     },
 
     sendSessionNotFound(res: Response, requestId: string | number | null = null) {
@@ -315,10 +439,11 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
       if (headerSessionId && pendingRecoveries[headerSessionId]) {
         session = pendingRecoveries[headerSessionId];
+        session.clientInfo = extractClientInfo(body) ?? session.clientInfo;
         clearPendingRecovery(headerSessionId);
         console.log(`[MCP] Using pending recovery transport for ${headerSessionId}`);
       } else {
-        session = await buildSession();
+        session = await buildSession(undefined, extractClientInfo(body));
       }
 
       const sid = headerSessionId || session.transport.sessionId;
@@ -329,7 +454,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       };
 
       if (sid) {
-        await enqueueSessionOp(sid, run);
+        await enqueueSessionOp(sid, () => trackRequest(sid, run));
       } else {
         await run();
       }
@@ -352,12 +477,26 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       // Notifications (including cancellation) must also reach in-flight calls.
       const notification = req.method === "POST" && body !== null &&
         typeof body === "object" && !("id" in body) && "method" in body;
-      if (req.method === "GET" || notification) {
+      if (req.method === "GET") {
+        if (!sid) {
+          await run();
+          return;
+        }
+        const endLiveConnection = beginLiveConnection(sid, res);
+        try {
+          await run();
+        } catch (error) {
+          endLiveConnection();
+          throw error;
+        }
+        return;
+      }
+      if (notification) {
         await run();
         return;
       }
       if (sid) {
-        await enqueueSessionOp(sid, run);
+        await enqueueSessionOp(sid, () => trackRequest(sid, run));
       } else {
         await run();
       }
@@ -402,7 +541,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       const headers = { ...req.headers, "mcp-session-id": staleSessionId };
       const patchedReq = Object.assign(req, { headers });
       await enqueueSessionOp(staleSessionId, async () => {
-        await recovered.transport.handleRequest(patchedReq, res, body);
+        await trackRequest(staleSessionId, () => recovered.transport.handleRequest(patchedReq, res, body));
       });
       return true;
     },
