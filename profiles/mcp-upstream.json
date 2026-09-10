@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "unity-mcp",
+      "name": "unity-mcp",
+      "enabled": false,
+      "transport": "http",
+      "args": [],
+      "env": {},
+      "url": "http://127.0.0.1:8080/mcp",
+      "tool_prefix": "unity-mcp",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    },
+    {
+      "id": "ida-pro-mcp",
+      "name": "ida-pro-mcp",
+      "enabled": false,
+      "transport": "http",
+      "args": [],
+      "env": {},
+      "url": "http://127.0.0.1:13337/mcp",
+      "tool_prefix": "ida-pro-mcp",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    },
+    {
+      "id": "ghidra-mcp",
+      "name": "ghidra-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "D:\\Crack\\ghidra-mcp-repo\\bridge_mcp_ghidra.py",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "GHIDRA_MCP_URL": "http://127.0.0.1:8089",
+        "GHIDRA_DEBUGGER_URL": "http://127.0.0.1:8099",
+        "PYTHONIOENCODING": "utf-8"
+      },
+      "tool_prefix": "ghidra-mcp",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    },
+    {
+      "id": "hexstrike-ai",
+      "name": "hexstrike-ai",
+      "enabled": false,
+      "transport": "stdio",
+      "command": "D:\\Coding\\MCP\\hexstrike-ai\\hexstrike_env\\Scripts\\python.exe",
+      "args": [
+        "D:\\Coding\\MCP\\hexstrike-ai\\hexstrike_mcp.py",
+        "--server",
+        "http://127.0.0.1:8888"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      },
+      "tool_prefix": "hexstrike-ai",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    },
+    {
+      "id": "open-design",
+      "name": "open-design",
+      "enabled": false,
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "D:\\Coding\\JS\\open-design\\node_modules\\@open-design\\daemon\\bin\\od.mjs",
+        "mcp",
+        "--daemon-url",
+        "http://127.0.0.1:7456"
+      ],
+      "env": {},
+      "tool_prefix": "open-design",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    },
+    {
+      "id": "colab-mcp",
+      "name": "colab-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--index",
+        "https://pypi.org/simple",
+        "--from",
+        "git+https://github.com/googlecolab/colab-mcp",
+        "colab-mcp"
+      ],
+      "env": {},
+      "tool_prefix": "colab-mcp",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    },
+    {
+      "id": "UnityMCP",
+      "name": "UnityMCP",
+      "enabled": false,
+      "transport": "http",
+      "args": [],
+      "env": {},
+      "url": "http://127.0.0.1:8080/mcp",
+      "tool_prefix": "UnityMCP",
+      "expose": "meta_only",
+      "tools": [],
+      "idle_timeout_sec": 600
+    }
+  ]
+}
