@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-workbench.mjs",
+    "test": "npm run build && node scripts/test-sandbox.mjs && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-workbench.mjs",
     "test:workbench": "npm run build && node scripts/test-workbench.mjs",
     "test:chatgpt": "npm run build && node scripts/test-chatgpt-web.mjs",
     "test:all": "node scripts/run-all-tests.mjs",
@@ -26,7 +26,7 @@
     "init-claude-md": "node scripts/init-claude-md.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "tunnel": "cloudflared tunnel --url http://localhost:3000"
+    "tunnel": "powershell -NoProfile -ExecutionPolicy Bypass -File ./tunnel.ps1"
   },
   "keywords": [
     "mcp",
@@ -46,6 +46,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "monaco-editor": "^0.56.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
