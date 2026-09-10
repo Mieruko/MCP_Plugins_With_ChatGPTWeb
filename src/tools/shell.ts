@@ -8,6 +8,7 @@ import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
 import { ProcessLog } from "../lib/process-log.js";
 import { executionContext, childEnvironment } from "../lib/workbench-context.js";
+import { executionNeedsSandbox, spawnSandboxedShell, terminateSandboxContainer } from "../lib/os-sandbox.js";
 import {
   bootstrapShellSession,
   execInShellSession,
@@ -29,6 +30,8 @@ interface ManagedProcess {
   listeners: Set<() => void>;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  sandbox?: "docker";
+  sandboxContainerName?: string;
 }
 
 const processes = new Map<string, ManagedProcess>();
@@ -40,7 +43,7 @@ function output(item: ManagedProcess, cursor: LogCursor | undefined, limit: numb
   return { id: item.id, running: !item.finished, exit_code: item.exitCode, signal: item.signal,
     stdout: stdout.text, stderr: stderr.text, cursor: { stdout: stdout.cursor, stderr: stderr.cursor },
     dropped: stdout.dropped || stderr.dropped, has_more: stdout.has_more || stderr.has_more,
-    ...(item.error ? { error: item.error } : {}) };
+    ...(item.sandbox ? { sandbox: item.sandbox } : {}), ...(item.error ? { error: item.error } : {}) };
 }
 
 async function waitForProcess(item: ManagedProcess, ms: number, ready: () => boolean, signal?: AbortSignal): Promise<void> {
@@ -53,6 +56,53 @@ async function waitForProcess(item: ManagedProcess, ms: number, ready: () => boo
     signal?.addEventListener("abort", finish, { once: true });
     check();
   });
+}
+
+async function waitForManagedExit(item: ManagedProcess, ms = 1500): Promise<boolean> {
+  if (item.finished) return true;
+  await new Promise<void>(resolve => {
+    const done = () => { clearTimeout(timer); item.child.off("close", done); resolve(); };
+    const timer = setTimeout(done, ms);
+    item.child.once("close", done);
+  });
+  return item.finished;
+}
+
+async function taskkill(pid: number, force: boolean): Promise<void> {
+  await new Promise<void>(resolve => {
+    const args = ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
+    const killer = spawn("taskkill", args, { windowsHide: true, stdio: "ignore" });
+    killer.once("close", () => resolve());
+    killer.once("error", () => resolve());
+  });
+}
+
+async function terminateManagedProcess(item: ManagedProcess, force: boolean): Promise<void> {
+  if (item.finished) return;
+  if (item.sandboxContainerName) {
+    await terminateSandboxContainer(item.sandboxContainerName, force);
+    if (!await waitForManagedExit(item, force ? 1800 : 1200)) item.child.kill();
+    return;
+  }
+  if (process.platform === "win32" && item.child.pid) {
+    // Killing powershell.exe alone can orphan the actual dev server. taskkill /T
+    // terminates the whole process tree; try graceful first, then force if needed.
+    await taskkill(item.child.pid, force);
+    if (!await waitForManagedExit(item, force ? 1800 : 900) && !force) {
+      await taskkill(item.child.pid, true);
+      await waitForManagedExit(item, 1800);
+    }
+    return;
+  }
+  item.child.kill(force ? "SIGKILL" : "SIGTERM");
+  if (!await waitForManagedExit(item, force ? 1800 : 900) && !force) {
+    item.child.kill("SIGKILL");
+    await waitForManagedExit(item, 1800);
+  }
+}
+
+export async function shutdownManagedProcesses(): Promise<void> {
+  await Promise.allSettled([...processes.values()].filter(item => !item.finished).map(item => terminateManagedProcess(item, true)));
 }
 
 export function registerShellTools(server: McpServer, defaultCwd: string, timeoutSec: number): void {
@@ -131,10 +181,12 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
     },
     async ({ command, working_directory, yield_time_ms }, extra) => {
       requireCommandAllowed(command);
-      const cwd = working_directory ? await validatePath(working_directory) : getShellStatus().cwd || defaultCwd;
+      const rawCwd = working_directory ? await validatePath(working_directory) : getShellStatus().cwd || defaultCwd;
+      const cwd = executionNeedsSandbox() ? await validatePath(rawCwd) : rawCwd;
       const shell = process.platform === "win32" ? "powershell.exe" : "bash";
       const args = process.platform === "win32" ? ["-NoProfile", "-Command", command] : ["-lc", command];
-      const child = spawn(shell, args, { cwd, windowsHide: true, env: childEnvironment() });
+      const launched = executionNeedsSandbox() ? await spawnSandboxedShell(command, cwd) : undefined;
+      const child = launched?.child ?? spawn(shell, args, { cwd, windowsHide: true, env: childEnvironment() });
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const item: ManagedProcess = {
         taskId: executionContext.getStore()?.taskId,
@@ -149,6 +201,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
         listeners: new Set(),
         exitCode: null,
         signal: null,
+        ...(launched ? { sandbox: launched.provider, sandboxContainerName: launched.containerName } : {}),
       };
       processes.set(id, item);
       const notify = () => { for (const listener of item.listeners) listener(); };
@@ -194,6 +247,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
           running: !p.finished,
           exit_code: p.exitCode,
           signal: p.signal,
+          ...(p.sandbox ? { sandbox: p.sandbox } : {}),
         }));
       return toolResult("process_status", { processes: processes_list }, { summary: `${processes_list.length} process(es)` });
     }
@@ -240,7 +294,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
       if (item.finished) {
         return toolResult("stop_process", { id, already_exited: true }, { summary: `${id} already exited` });
       }
-      item.child.kill(force ? "SIGKILL" : "SIGTERM");
+      await terminateManagedProcess(item, force);
       await audit({ tool: "stop_process", action: "stop", target: item.cwd, status: "ok", details: { id, force } });
       return toolResult("stop_process", { id, force }, { summary: `stop sent to ${id}` });
     }

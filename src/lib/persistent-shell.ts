@@ -1,6 +1,8 @@
 import { spawn } from "child_process";
 import path from "path";
-import { executionContext, childEnvironment, requireUnrestrictedExecution } from "./workbench-context.js";
+import { executionContext, childEnvironment } from "./workbench-context.js";
+import { validatePath } from "./path-security.js";
+import { executionNeedsSandbox, spawnSandboxedShell, terminateSandboxContainer } from "./os-sandbox.js";
 
 export interface ShellExecResult {
   command: string;
@@ -122,19 +124,21 @@ export function applyCwdDirectives(currentCwd: string, command: string): { cwd: 
   return { cwd, command: rest || "pwd" };
 }
 
-function runOnce(command: string, cwd: string, timeoutMs: number): Promise<ShellExecResult> {
-  requireUnrestrictedExecution();
+async function runOnce(command: string, cwd: string, timeoutMs: number): Promise<ShellExecResult> {
+  const sandboxed = executionNeedsSandbox();
+  const launched = sandboxed ? await spawnSandboxedShell(command, cwd) : undefined;
   return new Promise((resolve, reject) => {
     const shell = process.platform === "win32" ? "powershell.exe" : "bash";
     const args = process.platform === "win32" ? ["-NoProfile", "-Command", command] : ["-lc", command];
-    const child = spawn(shell, args, { cwd, windowsHide: true, env: childEnvironment() });
+    const child = launched?.child ?? spawn(shell, args, { cwd, windowsHide: true, env: childEnvironment() });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      if (launched) void terminateSandboxContainer(launched.containerName, true).finally(() => child.kill());
+      else child.kill();
     }, timeoutMs);
 
     child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
@@ -170,10 +174,11 @@ export async function execInShellSession(
   const task = taskShell();
   if (task) {
     const parsed = applyCwdDirectives(workingDirectory || task.cwd, command);
-    task.cwd = parsed.cwd;
+    const safeCwd = executionContext.getStore()?.workspaceOnly ? await validatePath(parsed.cwd) : parsed.cwd;
+    task.cwd = safeCwd;
     task.history.push(parsed.command);
     if (task.history.length > MAX_HISTORY) task.history.shift();
-    return runOnce(parsed.command, parsed.cwd, timeoutMs);
+    return runOnce(parsed.command, safeCwd, timeoutMs);
   }
   if (!sessionCwd) initShellSession(defaultCwd);
 
@@ -182,17 +187,16 @@ export async function execInShellSession(
   }
 
   const { cwd, command: effective } = applyCwdDirectives(sessionCwd!, command);
-  sessionCwd = cwd;
+  sessionCwd = executionContext.getStore()?.workspaceOnly ? await validatePath(cwd) : cwd;
 
   history.push(effective);
   if (history.length > MAX_HISTORY) history.shift();
 
-  const result = await runOnce(effective, cwd, timeoutMs);
-  sessionCwd = cwd;
+  const result = await runOnce(effective, sessionCwd, timeoutMs);
 
   if (persistenceRoot) {
     const prev = await loadGlobalShellState(persistenceRoot, defaultCwd);
-    await saveGlobalShellState(persistenceRoot, cwd, effective, prev);
+    await saveGlobalShellState(persistenceRoot, sessionCwd, effective, prev);
   }
 
   return result;

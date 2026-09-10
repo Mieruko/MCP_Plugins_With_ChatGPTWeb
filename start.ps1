@@ -1,7 +1,7 @@
 # Script khởi động Codex MCP Server trên Windows (foreground, xem log trực tiếp)
 param(
     [string]$Workspace = $env:WORKSPACE_PATH,
-    [int]$Port = 3000,
+    [int]$Port = 0,
     [switch]$Force,
     [switch]$OpenUI
 )
@@ -43,6 +43,11 @@ if (-not $Workspace) {
 
 if (-not $Workspace) {
     $Workspace = $ScriptDir
+}
+
+if ($Port -le 0) {
+    $envPort = Get-DotEnvValue "PORT"
+    $Port = if ($envPort) { [int]$envPort } else { 3000 }
 }
 
 $env:WORKSPACE_PATH = $Workspace

@@ -7,6 +7,7 @@ import { requireWriteAllowed } from "../lib/permissions.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
 import { requireUnrestrictedExecution, childEnvironment } from "../lib/workbench-context.js";
+import { executionNeedsSandbox, spawnSandboxedProgram, terminateSandboxContainer } from "../lib/os-sandbox.js";
 
 interface GitRunResult {
   stdout: string;
@@ -14,12 +15,64 @@ interface GitRunResult {
   exit_code: number;
 }
 
-function runGit(args: string[], cwd: string): Promise<GitRunResult> {
-  requireUnrestrictedExecution();
+interface GitStatusEntry {
+  path: string;
+  status: string;
+  original_path?: string;
+}
+
+function parsePorcelainV2(raw: string) {
+  const staged: GitStatusEntry[] = [];
+  const unstaged: GitStatusEntry[] = [];
+  const untracked: GitStatusEntry[] = [];
+  let branch = "";
+  let head_oid = "";
+  let upstream = "";
+  let ahead = 0;
+  let behind = 0;
+  const records = raw.split("\0").filter(Boolean);
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (record.startsWith("# branch.head ")) { branch = record.slice(14); continue; }
+    if (record.startsWith("# branch.oid ")) { head_oid = record.slice(13); continue; }
+    if (record.startsWith("# branch.upstream ")) { upstream = record.slice(18); continue; }
+    if (record.startsWith("# branch.ab ")) {
+      const match = record.match(/\+(\d+)\s+-(\d+)/);
+      if (match) { ahead = Number(match[1]); behind = Number(match[2]); }
+      continue;
+    }
+    if (record.startsWith("? ")) { untracked.push({ path: record.slice(2), status: "?" }); continue; }
+    if (record.startsWith("! ")) continue;
+    const ordinary = record.match(/^1 ([^ ]{2}) [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ (.*)$/);
+    const renamed = record.match(/^2 ([^ ]{2}) [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ (.*)$/);
+    const match = ordinary || renamed;
+    if (!match) continue;
+    const xy = match[1];
+    const path = match[2];
+    const original_path = renamed ? records[++i] : undefined;
+    if (xy[0] !== ".") staged.push({ path, status: xy[0], ...(original_path ? { original_path } : {}) });
+    if (xy[1] !== ".") unstaged.push({ path, status: xy[1], ...(original_path ? { original_path } : {}) });
+  }
+  return { branch: branch === "(detached)" ? "" : branch, head_oid, upstream, ahead, behind, staged, unstaged, untracked };
+}
+
+async function runGit(args: string[], cwd: string): Promise<GitRunResult> {
+  const sandboxed = executionNeedsSandbox();
+  const launched = sandboxed ? await spawnSandboxedProgram(
+    "git",
+    ["--no-pager", "-c", "core.fsmonitor=false", "-c", "safe.directory=*", ...args],
+    cwd,
+    { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "false", GIT_SEQUENCE_EDITOR: "false" }
+  ) : undefined;
+  if (!sandboxed) requireUnrestrictedExecution();
   return new Promise((resolve, reject) => {
-    const child = spawn("git", ["--no-pager", "-c", "core.fsmonitor=false", ...args], { cwd, windowsHide: true,
+    const child = launched?.child ?? spawn("git", ["--no-pager", "-c", "core.fsmonitor=false", ...args], { cwd, windowsHide: true,
       env: { ...childEnvironment(), GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "false", GIT_SEQUENCE_EDITOR: "false" } });
-    const timer = setTimeout(() => { child.kill(); reject(new Error("Git timed out after 120 seconds")); }, 120_000);
+    const timer = setTimeout(() => {
+      if (launched) void terminateSandboxContainer(launched.containerName, true).finally(() => child.kill());
+      else child.kill();
+      reject(new Error("Git timed out after 120 seconds"));
+    }, 120_000);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => (stdout = (stdout + d.toString()).slice(-200000)));
@@ -51,9 +104,13 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
     annotations: toolAnnotations("read"),
   }, async ({ path: repoPath }) => {
     const cwd = await repo(repoPath);
-    const r = await gitOrThrow(["status", "--short", "--branch"], cwd);
+    const [r, porcelain] = await Promise.all([
+      gitOrThrow(["status", "--short", "--branch"], cwd),
+      gitOrThrow(["status", "--porcelain=v2", "--branch", "-z"], cwd),
+    ]);
+    const status = parsePorcelainV2(porcelain.stdout);
     await audit({ tool: "git_status", action: "git", target: cwd, status: "ok" });
-    return toolResult("git_status", { path: cwd, output: r.stdout || "Clean working tree" });
+    return toolResult("git_status", { path: cwd, output: r.stdout || "Clean working tree", ...status });
   });
 
   server.registerTool("git_diff", {
@@ -205,6 +262,7 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
 
     annotations: toolAnnotations("edit"),
   }, async ({ path: repoPath, remote, branch, set_upstream }) => {
+    requireUnrestrictedExecution();
     requireWriteAllowed();
     const cwd = await repo(repoPath);
     const args = ["push"];
@@ -232,6 +290,7 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
 
     annotations: toolAnnotations("edit"),
   }, async ({ path: repoPath, remote, branch }) => {
+    requireUnrestrictedExecution();
     requireWriteAllowed();
     const cwd = await repo(repoPath);
     const args = ["pull", "--ff-only", remote];
@@ -292,11 +351,13 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
   server.registerTool("git_fetch", { title: "Fetch remote", inputSchema: {
     path: z.string().optional(), remote: ref.default("origin"),
   }, annotations: toolAnnotations("command") }, async ({ path: p, remote }) => {
+    requireUnrestrictedExecution();
     return toolResult("git_fetch", await gitOrThrow(["fetch", "--", remote], await repo(p)));
   });
   server.registerTool("git_worktree", { title: "Git worktrees", inputSchema: {
     path: z.string().optional(), action: z.enum(["list", "add"]), directory: z.string().optional(), branch: ref.optional(),
   }, annotations: toolAnnotations("command") }, async ({ path: p, action, directory, branch }) => {
+    requireUnrestrictedExecution();
     const cwd = await repo(p);
     if (action === "list") return toolResult("git_worktree", await gitOrThrow(["worktree", "list", "--porcelain"], cwd));
     if (!directory || !branch) throw new Error("directory and new branch are required");

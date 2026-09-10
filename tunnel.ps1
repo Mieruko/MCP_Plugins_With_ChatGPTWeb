@@ -1,10 +1,24 @@
 # Expose MCP server qua Cloudflare Tunnel (thay ngrok)
 param(
-    [int]$Port = 3000
+    [int]$Port = 0
 )
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
+
+function Get-DotEnvValue([string]$Name) {
+    if (-not (Test-Path ".env")) { return $null }
+    $line = Get-Content ".env" | Where-Object {
+        $_ -match "^\s*$Name\s*=" -and -not $_.TrimStart().StartsWith("#")
+    } | Select-Object -First 1
+    if (-not $line) { return $null }
+    return (($line -split "=", 2)[1].Trim()).Trim("'").Trim('"')
+}
+
+if ($Port -le 0) {
+    $envPort = Get-DotEnvValue "PORT"
+    $Port = if ($envPort) { [int]$envPort } else { 3000 }
+}
 
 function Get-CloudflaredPath {
     $cmd = Get-Command cloudflared -ErrorAction SilentlyContinue

@@ -27,6 +27,7 @@ import {
 import { getChatGptToolProfile } from "./lib/tool-profile.js";
 import { initializeLocalAuth, requireMcpAuth } from "./lib/local-auth.js";
 import { executionContext } from "./lib/workbench-context.js";
+import { shutdownManagedProcesses } from "./tools/shell.js";
 import { LocalOAuthProvider, setOAuthProvider } from "./lib/oauth-provider.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 
@@ -162,6 +163,7 @@ app.get("/health", (_req, res) => {
     fullMachineAccess: false,
     fullDiskAccess: getFullDiskAccess(),
     activeSessions: sessionManager.count(),
+    recoverableSessions: sessionManager.list().length,
     sessionRecovery: SESSION_RECOVERY,
     mcpEndpoints: MCP_PATHS,
     instructions: summarizeInstructionContext(instructionContext),
@@ -281,6 +283,7 @@ const adminServer = startAdminServer({
   pid: process.pid,
   manager: upstreamManager,
   sessionCount: () => sessionManager.count(),
+  sessionList: () => sessionManager.list(),
   instructionSummary: () => summarizeInstructionContext(instructionContext),
   instructionsPreview: () => instructionContext.instructionsText,
 });
@@ -317,13 +320,23 @@ server.on("error", (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-process.on("SIGINT", () => {
-  console.log("\n[DUNG] Server dang tat...");
+let shuttingDown = false;
+function shutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[DUNG] Server dang tat (${signal})...`);
   sessionManager.stopCleanup();
-  void upstreamManager.shutdown();
-  adminServer.close();
-  server.close(() => process.exit(0));
-});
+  void (async () => {
+    await shutdownManagedProcesses();
+    await upstreamManager.shutdown();
+    adminServer.close();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 4000).unref?.();
+  })();
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // Tranh process tu tat khi stdin dong (Windows + .bat)
 if (process.stdin.isTTY) {
