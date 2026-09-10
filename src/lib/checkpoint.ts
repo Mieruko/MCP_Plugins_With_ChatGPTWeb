@@ -268,7 +268,12 @@ export async function checkpointBefore(
   paths: string[],
   options?: { summary?: string; dry_run?: boolean }
 ): Promise<string | null> {
-  if (!options?.dry_run) await executionContext.getStore()?.capture(paths);
+  const workbenchContext = executionContext.getStore();
+  if (!options?.dry_run) await workbenchContext?.capture(paths);
+  // Workbench's task journal is the canonical checkpoint source for normal MCP
+  // sessions. Keep the legacy snapshot store only for direct/non-Workbench
+  // callers so older tests and integrations remain compatible.
+  if (workbenchContext) return null;
   if (!isEnabled() || options?.dry_run) return null;
 
   const uniquePaths = [...new Set(paths.map((p) => path.resolve(p)))];

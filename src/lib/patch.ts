@@ -308,16 +308,91 @@ export async function applyMultiFilePatch(
 export function buildSimpleDiff(oldContent: string, newContent: string): string {
   const oldLines = normalizeEol(oldContent).split("\n");
   const newLines = normalizeEol(newContent).split("\n");
-  const diff: string[] = [];
+  if (oldContent === newContent) return "(no visible diff)";
 
-  for (let i = 0; i < Math.max(oldLines.length, newLines.length); i++) {
-    const oldLine = oldLines[i];
-    const newLine = newLines[i];
-    if (oldLine !== newLine) {
-      if (oldLine !== undefined) diff.push(`- ${oldLine}`);
-      if (newLine !== undefined) diff.push(`+ ${newLine}`);
+  type DiffOp = {
+    type: "context" | "remove" | "add";
+    text: string;
+    oldBefore: number;
+    newBefore: number;
+  };
+
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
+
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) suffix++;
+
+  const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix);
+  const newMiddle = newLines.slice(prefix, newLines.length - suffix);
+  const middleOps: Array<{ type: DiffOp["type"]; text: string }> = [];
+  const cells = (oldMiddle.length + 1) * (newMiddle.length + 1);
+
+  if (cells <= 2_000_000) {
+    const width = newMiddle.length + 1;
+    const table = new Uint32Array(cells);
+    for (let i = oldMiddle.length - 1; i >= 0; i--) {
+      for (let j = newMiddle.length - 1; j >= 0; j--) {
+        const index = i * width + j;
+        table[index] = oldMiddle[i] === newMiddle[j]
+          ? table[(i + 1) * width + j + 1] + 1
+          : Math.max(table[(i + 1) * width + j], table[index + 1]);
+      }
     }
+    let i = 0, j = 0;
+    while (i < oldMiddle.length || j < newMiddle.length) {
+      if (i < oldMiddle.length && j < newMiddle.length && oldMiddle[i] === newMiddle[j]) {
+        middleOps.push({ type: "context", text: oldMiddle[i] }); i++; j++;
+      } else if (j < newMiddle.length && (i >= oldMiddle.length || table[i * width + j + 1] >= table[(i + 1) * width + j])) {
+        middleOps.push({ type: "add", text: newMiddle[j++] });
+      } else if (i < oldMiddle.length) {
+        middleOps.push({ type: "remove", text: oldMiddle[i++] });
+      }
+    }
+  } else {
+    for (const line of oldMiddle) middleOps.push({ type: "remove", text: line });
+    for (const line of newMiddle) middleOps.push({ type: "add", text: line });
   }
 
-  return diff.join("\n") || "(no visible diff)";
+  const rawOps: Array<{ type: DiffOp["type"]; text: string }> = [
+    ...oldLines.slice(0, prefix).map(text => ({ type: "context" as const, text })),
+    ...middleOps,
+    ...oldLines.slice(oldLines.length - suffix).map(text => ({ type: "context" as const, text })),
+  ];
+
+  let oldLine = 1, newLine = 1;
+  const ops: DiffOp[] = rawOps.map(op => {
+    const annotated = { ...op, oldBefore: oldLine, newBefore: newLine };
+    if (op.type !== "add") oldLine++;
+    if (op.type !== "remove") newLine++;
+    return annotated;
+  });
+  const changed = ops.map((op, index) => op.type === "context" ? -1 : index).filter(index => index >= 0);
+  if (!changed.length) return "(no visible diff)";
+
+  const context = 3;
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const index of changed) {
+    const start = Math.max(0, index - context);
+    const end = Math.min(ops.length - 1, index + context);
+    const last = ranges[ranges.length - 1];
+    if (last && start <= last.end + 1) last.end = Math.max(last.end, end);
+    else ranges.push({ start, end });
+  }
+
+  const diff: string[] = [];
+  for (const range of ranges) {
+    const hunk = ops.slice(range.start, range.end + 1);
+    const oldCount = hunk.filter(op => op.type !== "add").length;
+    const newCount = hunk.filter(op => op.type !== "remove").length;
+    diff.push(`@@ -${hunk[0].oldBefore},${oldCount} +${hunk[0].newBefore},${newCount} @@`);
+    for (const op of hunk) {
+      diff.push(`${op.type === "add" ? "+" : op.type === "remove" ? "-" : " "}${op.text}`);
+    }
+  }
+  return diff.join("\n");
 }

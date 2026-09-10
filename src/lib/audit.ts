@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { appendActivity } from "./activity-log.js";
+import { executionContext } from "./workbench-context.js";
 
 export type AuditStatus = "ok" | "error" | "blocked" | "dry-run";
 
@@ -15,9 +16,11 @@ export interface AuditEvent {
 const auditPath = process.env.AUDIT_LOG_PATH || path.resolve(process.cwd(), ".mcp-audit.log");
 
 export async function audit(event: AuditEvent): Promise<void> {
+  const context = executionContext.getStore();
   const record = {
     time: new Date().toISOString(),
     pid: process.pid,
+    ...(context ? { task_id: context.taskId, operation_id: context.operationId } : {}),
     ...event,
   };
 
@@ -35,6 +38,8 @@ export async function audit(event: AuditEvent): Promise<void> {
       action: event.action,
       target: event.target,
       status: event.status ?? "ok",
+      task_id: context?.taskId,
+      operation_id: context?.operationId,
       summary: event.target || (event.details ? JSON.stringify(event.details).slice(0, 120) : undefined),
       details: event.details,
     });

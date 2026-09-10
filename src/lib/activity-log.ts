@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "fs/promises";
 import { getAuditPath } from "./audit.js";
+import { executionContext } from "./workbench-context.js";
 
 export type ActivityKind = "tool" | "mcp" | "session" | "system";
 
@@ -14,6 +15,8 @@ export interface ActivityEntry {
   status?: string;
   duration_ms?: number;
   session_id?: string;
+  task_id?: string;
+  operation_id?: string;
   client?: string;
   summary?: string;
   details?: Record<string, unknown>;
@@ -49,9 +52,11 @@ export function summarizeToolArgs(tool: string, args: unknown): string {
 }
 
 export function appendActivity(partial: Omit<ActivityEntry, "id" | "time"> & { time?: string }): ActivityEntry {
+  const context = executionContext.getStore();
   const entry: ActivityEntry = {
     id: randomUUID(),
     time: partial.time ?? new Date().toISOString(),
+    ...(context ? { task_id: context.taskId, operation_id: context.operationId, ...(context.sessionId ? { session_id: context.sessionId } : {}) } : {}),
     ...partial,
   };
 
@@ -139,6 +144,8 @@ export async function loadAuditHistory(limit = 80): Promise<ActivityEntry[]> {
           action: String(rec.action || ""),
           target: rec.target ? String(rec.target) : undefined,
           status: rec.status ? String(rec.status) : undefined,
+          task_id: rec.task_id ? String(rec.task_id) : undefined,
+          operation_id: rec.operation_id ? String(rec.operation_id) : undefined,
           details: rec.details as Record<string, unknown> | undefined,
           summary: rec.target ? String(rec.target) : undefined,
         };
