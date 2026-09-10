@@ -1,347 +1,368 @@
 <div align="center">
 
-# ChatGPT Local Coder
+# MCP Plugins With ChatGPT Web
 
-**Turn ChatGPT web into a local coding agent — files, shell, git, patches, 40+ MCP tools.**
+**A self-hosted local coding Workbench that connects ChatGPT Web to your machine through MCP.**
+
+Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Diff · Checkpoints · Upstream MCP
 
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io)
-[![ChatGPT](https://img.shields.io/badge/ChatGPT-Developer%20Mode-10a37f?style=flat-square)](https://platform.openai.com/docs/guides/developer-mode)
+[![ChatGPT](https://img.shields.io/badge/ChatGPT-Web-10a37f?style=flat-square)](https://chatgpt.com)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Windows](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4?style=flat-square)](https://nodejs.org)
 
-[Quick Start](#-quick-start) · [Connect ChatGPT](#-connect-chatgpt) · [Tools](#-tools) · [Tunnel](#-tunnel-options) · [Troubleshooting](#-troubleshooting) · [Tiếng Việt](#-tiếng-việt)
+[Quick Start](#quick-start) · [Workbench](#workbench) · [ChatGPT](#connect-chatgpt) · [GitHub](#github-integration) · [Security](#permissions-and-security) · [Upstream](#upstream-and-project-history)
 
 </div>
 
 ---
 
-ChatGPT Local Coder is a **self-hosted MCP server** for local coding, with task permissions, approval requests, file review/undo and Git/GitHub tools.
+## About this project
 
-**Workbench branch:** see [setup, behavior and known limits](docs/workbench.md). This is an initial implementation, not complete Codex parity. New tasks default to Ask + workspace-only. An OS process sandbox is not implemented; shell/Git/GitHub require explicitly disabling workspace-only scope. MCP authentication is now required; ChatGPT uses OAuth with local consent.
+**MCP Plugins With ChatGPT Web** turns ChatGPT Web into a local coding agent while keeping the project, terminal, Git state and approval flow on your own computer.
 
-No desktop app. No vendor lock-in. Run one Node process on your PC, expose it through a tunnel, and code from ChatGPT in the browser.
+It started from [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder) and has since been extended into a larger local coding Workbench with a different workflow and UI.
 
+The current project adds and develops features such as:
+
+- a Codex-inspired local Workbench UI;
+- multiple registered workspaces instead of a single fixed project;
+- task-scoped permissions and persistent task/session binding;
+- real Active Agent/session tracking;
+- project Explorer and workspace search;
+- Monaco-based file viewing/editing;
+- Codex-style review and colored unified diffs;
+- operation history, checkpoints, Undo/Redo and rewind compatibility;
+- foreground shell and managed background processes;
+- structured Git controls for status, diff, staging, commit, branches, worktrees, fetch, pull and push;
+- GitHub PR / Issue / Checks integration through GitHub CLI;
+- upstream MCP server discovery and proxying;
+- OAuth support for ChatGPT MCP connections;
+- optional Docker isolation for workspace-only command execution;
+- local admin/control APIs protected from non-local access.
+
+The Workbench and MCP server use the same underlying task, permission and tool execution model rather than maintaining two independent implementations.
+
+## Architecture
+
+```text
+┌────────────────────┐       HTTPS / MCP       ┌─────────────────────────────┐
+│    ChatGPT Web     │ ───────────────────────► │ MCP Plugins With ChatGPT Web│
+│ Connector / OAuth  │                          │ MCP server                  │
+└────────────────────┘                          └──────────────┬──────────────┘
+                                                            │
+                                         ┌──────────────────┴──────────────────┐
+                                         │                                     │
+                                ┌────────▼────────┐                   ┌────────▼────────┐
+                                │ Local Workbench │                   │ Coding tools     │
+                                │ localhost only  │                   │ Files/Shell/Git  │
+                                └────────┬────────┘                   └─────────────────┘
+                                         │
+                     ┌───────────────────┼────────────────────┐
+                     ▼                   ▼                    ▼
+                 Workspaces            Tasks             Active agents
+                 Explorer/Search       Policy/History    MCP sessions
+                 Editor/Diff           Checkpoints       Task binding
 ```
-┌─────────────────┐     HTTPS      ┌──────────────────┐     localhost     ┌─────────────────────┐
-│   ChatGPT Web   │ ─────────────► │  Tunnel (opt.)   │ ────────────────► │  chatgpt-local-coder │
-│ Developer Mode  │                │ OpenAI / CF      │      :3000/mcp    │  40+ MCP tools       │
-└─────────────────┘                └──────────────────┘                   └──────────┬──────────┘
-                                                                                    │
-                                         ┌──────────────────────────────────────────┼──────────┐
-                                         ▼                    ▼                    ▼          ▼
-                                   Filesystem              Shell + Git         Background    Project
-                                   read/write/patch        status/diff/commit   processes     context
-```
 
-## ✨ Why this project
+## Requirements
 
-| | ChatGPT alone | **+ ChatGPT Local Coder** |
-|---|---|---|
-| Edit your repo | ❌ | ✅ `apply_patch`, `edit_file`, `multi_edit` |
-| Run tests / builds | ❌ | ✅ `run_command`, `start_process` |
-| Git workflow | ❌ | ✅ `git_status`, `git_commit`, `git_push`, … |
-| Explore codebase | Limited | ✅ `glob`, `grep`, `list_directory` |
-| Configurable access | ❌ | ✅ Task permissions and optional workspace file boundary |
-| Session recovery | — | ✅ Auto-recover after server restart |
+- Node.js 18+;
+- npm;
+- Git for Git features;
+- GitHub CLI (`gh`) for GitHub PR / Issue features;
+- Windows PowerShell for the included Windows helper scripts;
+- Docker Desktop / Docker Engine only when you explicitly enable the Docker workspace sandbox.
 
-Built for **ChatGPT Developer Mode** with batched inspection, cursor-based process output, honest tool annotations and a local Workbench dashboard.
+## Quick Start
 
-## 🚀 Quick Start
-
-**Requirements:** [Node.js](https://nodejs.org) 18+, npm, Git (optional, for git tools)
+Clone **this fork**:
 
 ```powershell
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-copy .env.example .env          # edit WORKSPACE_PATH
+git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
+cd MCP_Plugins_With_ChatGPTWeb
+Copy-Item .env.example .env
 npm install
 npm run build
 .\start.ps1
 ```
 
-Server runs at `http://localhost:3000` — health check: `http://localhost:3000/health`
+Default services from `.env.example`:
 
-<details>
-<summary><b>macOS / Linux</b></summary>
-
-```bash
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-cp .env.example .env
-npm install && npm run build
-npm start
+```text
+MCP server:  http://localhost:3000
+Workbench:   http://127.0.0.1:3001/ui/workbench.html
 ```
 
-</details>
+You can change `PORT` and `ADMIN_PORT` if those ports are already in use.
 
-## 🔌 Connect ChatGPT
+### Important environment settings
 
-### 1. Enable Developer Mode
+```dotenv
+PORT=3000
+ADMIN_PORT=3001
+WORKSPACE_PATH=C:\Users\YourName\projects\my-app
+CHATGPT_TOOL_PROFILE=slim
+WORKBENCH_DEFAULT_MODE=ask
+```
 
-1. Open [ChatGPT](https://chatgpt.com) → **Settings** → **Apps & Connectors**
-2. Under **Advanced**, enable **Developer mode**
+`WORKSPACE_PATH` is the bootstrap/default project. Additional projects can be registered directly from the Workbench with **Add workspace**; they do not require a server restart.
 
-### 2. Expose your server (pick one tunnel)
+Do not commit your real `.env`, credentials, tokens or Workbench state.
 
-See [Tunnel options](#-tunnel-options) below. You need a **public HTTPS** URL pointing to `http://localhost:3000/mcp`.
+## Workbench
 
-### 3. Create a connector
+Open:
 
-1. **Settings** → **Connectors** → **Create**
-2. Fill in:
+```text
+http://127.0.0.1:3001/ui/workbench.html
+```
 
-| Field | Value |
-|-------|-------|
-| **Name** | `Local Coder` |
-| **Description** | `Local coding agent. First call agent_status + project_context. Use glob/grep to explore, apply_patch to edit, run_command for shell.` |
-| **URL** | Your tunnel HTTPS URL (e.g. `https://…` or OpenAI Tunnel ID) |
-| **Authentication** | OAuth — configure PUBLIC_BASE_URL and approve the connection in local Workbench |
+The admin server is bound to localhost. Authentication credentials are generated/stored locally when explicit environment overrides are not configured.
 
-3. **Create** → verify tools appear in the list
+### Workspaces and tasks
 
-### 4. Use in chat — **must tag the connector**
+A **Workspace** represents a local project directory. A workspace may exist before it has any task.
 
-Every message that should use local tools **must include the connector**. If you skip this, ChatGPT only uses built-in tools, may show *"Looking for available tools"* / *"Đang tìm các công cụ có sẵn"*, then **"Error in message stream"** / **"Lỗi trong luồng tin nhắn"** — with **no error in server logs** (the MCP server was never called).
+A **Task** represents a unit of work inside one workspace and carries its own permission policy and operation history.
 
-**How to tag (pick one):**
+New MCP sessions bind to the currently selected task. Existing sessions remain pinned to the task they started with, so switching the selected workspace/task does not silently move an already-running ChatGPT session into another project.
 
-1. **Before sending:** **New chat** → **+** (tools) → **More** → enable **Local Coder** (connector stays on for that chat).
-2. **In the message:** type **`@`** and choose **Local Coder** (or your connector name) so it appears as a pill/chip above the input.
+The Workbench currently provides:
 
-Then send your prompt. You should see tool permission prompts or MCP activity — not a dead stream with no server log.
+- **Workspace switcher** — register and switch between local project folders;
+- **Explorer** — browse project directories and open files;
+- **Search** — grep/glob project contents;
+- **Editor** — inspect and edit text files using Monaco;
+- **Changes** — staged, modified and untracked Git state;
+- **Review** — operation-level and Git-style diffs with additions/deletions;
+- **Terminal** — foreground commands and managed background jobs;
+- **Active Agents** — real active MCP sessions instead of historical/stale session counts;
+- **History** — task operations, checkpoints and restore actions;
+- **MCP Settings** — inspect/import upstream MCP servers;
+- **System Settings** — environment/context/runtime diagnostics.
 
-Example prompts (after tagging):
+## Connect ChatGPT
 
-- *"Read package.json and explain the dependencies"*
-- *"Run npm test and fix any failures"*
-- *"Find all TODO comments with grep and summarize"*
-
-> **Tip:** After server updates or restarts → **Refresh** the connector and start a **new chat** (re-tag the connector).  
-> **Avoid** clicking **"Always allow"** on permission popups — it can reset the MCP session. Configure permissions in **Settings → Apps** instead.
-
-## 🌐 Tunnel options
-
-### Option A — OpenAI Secure MCP Tunnel *(recommended)*
-
-Stable tunnel ID — connector URL never changes.
+### 1. Start the local server
 
 ```powershell
-# Terminal 1
 .\start.ps1 -Force
+```
 
-# Terminal 2 — first time only
-.\openai-tunnel-init.bat    # enter tunnel_id + Runtime API key from OpenAI Platform
+### 2. Expose the MCP endpoint through HTTPS
 
-# Every time after
+The admin/Workbench port should stay local. Only expose the MCP service.
+
+For a stable OpenAI tunnel, initialize once and then run the provided tunnel helper:
+
+```powershell
+.\openai-tunnel-init.bat
 .\openai-tunnel.bat
 ```
 
-Get credentials: [OpenAI Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels)
+A Cloudflare tunnel helper is also included for development/testing where a changing public URL is acceptable.
 
-In ChatGPT Connectors: **Connection type → Tunnel** → paste your `tunnel_…` ID.
+### 3. Configure ChatGPT
 
-### Option B — Cloudflare Quick Tunnel
+Configure the MCP connector to use the public HTTPS MCP endpoint and OAuth. When OAuth approval is requested, review and approve the matching request from your local Workbench.
 
-Free, but URL changes on every restart (update connector each time).
+After server/tool changes, refresh the connector and start a new ChatGPT conversation so the client receives the current tool schema.
+
+## MCP tools
+
+The server supports a `slim` profile optimized for ChatGPT Web and a `full` profile for exposing the complete local tool set.
+
+Core capabilities include:
+
+| Area | Examples |
+| --- | --- |
+| Workbench | `workbench` |
+| Batched inspection | `inspect_code` |
+| Files | `read_text_file`, `write_file`, `edit_file`, `multi_edit`, `apply_patch` |
+| Search | `glob`, `grep`, `list_directory` |
+| Shell | `run_command`, `shell_status` |
+| Processes | `start_process`, `process_output`, `stop_process` |
+| Git | `git_status`, `git_diff`, `git_add`, `git_commit`, `git_restore` |
+| Git remote | `git_fetch`, `git_pull`, `git_push` |
+| Git structure | `git_branch`, `git_worktree`, `git_log` |
+| Project context | `agent_status`, `project_context`, `load_path_rules`, `remember` |
+| History | `rewind` |
+| GitHub | `github` |
+| MCP hub | `mcp_servers` and upstream MCP proxy tools |
+
+Tool responses use structured data so ChatGPT can reason over results without scraping terminal text where a structured representation is available.
+
+## Git and GitHub integration
+
+### Local Git
+
+If a workspace is a Git repository, the Workbench/MCP tools can work with its existing repository state and remotes.
+
+Supported workflows include:
+
+- branch/ahead/behind status;
+- working and staged diffs;
+- explicit staging/unstaging;
+- commits;
+- branch switching/creation;
+- worktrees;
+- fetch;
+- fast-forward-only pull;
+- explicit-branch push.
+
+Remote write operations remain subject to the active Workbench permission policy.
+
+### GitHub integration
+
+Install GitHub CLI and authenticate locally:
 
 ```powershell
-# Terminal 1
-.\start.bat
-
-# Terminal 2
-.\tunnel.bat    # copy https://….trycloudflare.com into connector URL
+gh auth login
+gh auth status
 ```
 
-Install cloudflared: `winget install Cloudflare.cloudflared`
+GitHub support currently includes:
 
-## 🧰 Tools
+- list/view pull requests;
+- inspect pull-request checks;
+- create an explicit draft PR from an already-pushed branch;
+- merge a reviewed exact head SHA;
+- list/view issues.
 
-**40+ tools** with structured JSON responses `{ ok, tool, summary, data }`.
+GitHub credentials stay with the local `gh` installation. Do not place GitHub tokens in prompts, README files or committed environment files.
 
-### Onboarding *(call these first)*
+## Permissions and security
 
-| Tool | Description |
-|------|-------------|
-| `agent_status` | Permissions, workspace roots, audit log |
-| `project_context` | Reads AGENTS.md, README, CLAUDE.md, configs |
+Each task has a permission mode:
 
-### Filesystem
+| Mode | Behavior |
+| --- | --- |
+| **Ask** | Read operations run; mutations require local approval. |
+| **Auto / Approve for me** | Supported safe edits can be approved by deterministic rules; higher-risk operations still require approval. |
+| **Full** | Workbench approval prompts are disabled for the task. |
 
-| Tool | Description |
-|------|-------------|
-| `read_text_file` | Read source files (offset + limit) |
-| `write_file` | Create or overwrite files |
-| `edit_file` | Find-and-replace edits |
-| `multi_edit` | Multiple edits in one file |
-| `replace_regex` | Regex replace in file |
-| `apply_patch` | Unified / Codex-style patches |
-| `glob` | Find files by pattern (sorted by mtime) |
-| `grep` | Search content (content / files / count modes) |
-| `list_directory` | List folder contents |
-| `directory_tree` | Recursive tree as JSON |
-| `create_directory` | Create folders |
-| `delete_file` / `delete_directory` | Remove files or dirs |
-| `copy_file` / `move_file` | Copy or rename |
-| `read_file_base64` / `write_file_base64` | Binary file support |
+The workspace-only scope is independent from the approval mode.
 
-### Shell
+### Workspace path protection
 
-| Tool | Description |
-|------|-------------|
-| `run_command` | Run shell commands (`npm test`, builds, …) |
-| `shell_status` / `shell_reset` | Persistent shell session |
-| `start_process` | Long-running / background commands |
-| `process_status` / `process_output` / `stop_process` | Manage background jobs |
+Workspace-bound file operations use canonical path checks and protections for traversal and filesystem indirection. Workbench state/control files are kept outside normal project access.
 
-### Git
+### Optional Docker sandbox
 
-| Tool | Description |
-|------|-------------|
-| `git_status` / `git_diff` / `git_log` | Inspect repo |
-| `git_add` / `git_commit` | Stage and commit |
-| `git_branch` / `git_checkout` | Branch list, create, switch (local only) |
-| `git_restore` | Restore tracked files to last commit |
-| `git_push` / `git_pull` | Sync with configured remote |
-| `git_stash` / `git_reset` | Stash and reset |
+Docker sandboxing is **opt-in**:
 
-### Claude Code ↔ MCP mapping
+```dotenv
+WORKBENCH_SANDBOX_PROVIDER=docker
+WORKBENCH_SANDBOX_IMAGE=node:22-bookworm
+```
 
-| Claude Code | This server |
-|-------------|-------------|
-| `Read` | `read_text_file` |
-| `Write` | `write_file` |
-| `Edit` / `MultiEdit` | `edit_file` / `multi_edit` |
-| `Glob` / `Grep` / `LS` | `glob` / `grep` / `list_directory` |
-| `Bash` | `run_command` |
-| — | `apply_patch`, `git_*`, `project_context` |
+Pull the image yourself before enabling it:
 
-## ⚙️ Configuration
+```powershell
+docker pull node:22-bookworm
+```
 
-Copy `.env.example` → `.env`:
+When active, supported workspace-only shell/local Git execution uses a constrained container with the task workspace mounted read/write and network disabled. The server intentionally does not auto-pull images.
 
-```env
-PORT=3000
-WORKSPACE_PATH=C:\Users\You\projects\my-app
-WORKBENCH_DEFAULT_MODE=ask
-SHELL_TIMEOUT=120
+GitHub operations, remote Git, upstream MCP calls and project Preview require machine/network scope and are not claimed to run inside that no-network sandbox.
+
+## Review, checkpoints and Undo
+
+Supported file mutations are journaled per task.
+
+The Workbench can retain before/after snapshots for review and can restore recorded file states when conflict checks pass.
+
+Important behavior:
+
+- pending edits can be reviewed before approval;
+- approval is bound to the operation/version that was reviewed;
+- external concurrent file changes can invalidate an approval/restore;
+- task checkpoints provide timeline boundaries;
+- Undo/Redo/checkpoint restore apply to tracked file changes;
+- shell commands, Git remote actions and other external side effects are reported separately and are **not falsely claimed to be undone**.
+
+## Active Agents and session recovery
+
+MCP sessions are tracked with their task/workspace identity, client metadata and last activity.
+
+Session recovery can be enabled with:
+
+```dotenv
 MCP_SESSION_RECOVERY=true
-
-# OpenAI Secure Tunnel (optional)
-OPENAI_TUNNEL_ID=
-OPENAI_TUNNEL_API_KEY=
 ```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WORKSPACE_PATH` | `cwd` | **Your project root** (like `cd` before `claude`). Auto-loads `CLAUDE.md` / `AGENTS.md` into MCP instructions |
-| `WORKBENCH_DEFAULT_MODE` | `ask` | Initial policy for new tasks: `ask`, `auto`, or `full`; `full` also defaults to machine scope |
-| `MCP_SESSION_RECOVERY` | `true` | Auto-recover stale sessions after restart |
-| `SHELL_TIMEOUT` | `120` | Max seconds for `run_command` |
-| `FULL_DISK_ACCESS` / `CHATGPT_AUTO_APPROVE` | Legacy | Do not override Workbench task permissions |
+Known session-to-task mappings are persisted so a recovered session remains associated with its original task after a server restart.
 
-> New tasks default to **Ask + workspace-only**. Use the Workbench dashboard to change scope and approval mode; changing tool annotations does not grant permission.
+## Upstream MCP hub
 
-## 🏗️ Architecture
+The project can connect to other local/upstream MCP servers and expose selected tools through this server.
 
-```
-src/
-├── index.ts                 # Express + MCP session manager
-├── server-factory.ts        # Tool registration
-├── lib/
-│   ├── mcp-session-manager.ts   # Session recovery, TTL
-│   ├── patch.ts             # apply_patch engine
-│   └── persistent-shell.ts  # Stateful shell
-└── tools/
-    ├── filesystem.ts        # 18 tools
-    ├── shell.ts             # 8 tools
-    ├── git.ts               # 11 tools
-    └── context.ts           # agent_status, project_context
+Configuration defaults to:
+
+```dotenv
+MCP_UPSTREAM_CONFIG=profiles/mcp-upstream.json
 ```
 
-- **Transport:** MCP Streamable HTTP (`/mcp` and `/`)
-- **Session:** Stateful with auto-recovery when ChatGPT holds a stale session ID
-- **Output:** Structured JSON from every tool
+The Workbench can inspect configured upstream servers and includes import flows for supported MCP configuration formats.
 
-## 🧪 Development
-
-### ChatGPT web performance
-
-The default `slim` profile includes `inspect_code` for batched reads/searches with path
-rules, and cursor-based background output. SSE connections no longer block subsequent
-tool calls. See [design, examples and rollout](docs/chatgpt-web-performance.md).
-
-Run `npm run test:chatgpt` for the isolated HTTP/SSE and workflow regression tests.
+## Development
 
 ```powershell
-npm run build          # compile TypeScript
-npm test               # patch + tool unit tests
-npm run dev            # watch mode (tsx)
-node scripts/test-mcp-session.mjs   # integration test (server must be running)
+npm install
+npm run build
+npm test
 ```
 
-## 🔒 Security
+Useful commands:
 
-Full access is an explicit task setting. OAuth linking requires local consent, and the admin API requires its own token. Workspace-only currently restricts file tools and blocks arbitrary processes; it is not an OS sandbox. See [limitations](docs/workbench.md#limitations) before enabling unrestricted commands.
+```powershell
+npm run dev
+npm run test:workbench
+npm run test:chatgpt
+npm run test:integration
+```
 
-- `.env` and secrets are gitignored
-- Audit log: `.mcp-audit.log` (optional, configurable)
-- Use on a trusted network / personal machine only
+The main source is TypeScript under `src/`; the Workbench frontend is under `public/ui/`.
 
-## 🩺 Troubleshooting
+## Repository remotes for this fork
 
-| Problem | Fix |
-|---------|-----|
-| **"Error in message stream"** / **"Lỗi trong luồng tin nhắn"** right after *"Looking for tools"* — **no server log** | You did **not tag the connector**. New chat → **+** → **More** → enable connector, or type **`@Local Coder`** in the message. Then retry. |
-| **Resource not found** on tool call | Refresh connector + new chat. Server auto-recovers sessions — ensure latest build is running. |
-| **Connection failed** | Check `.\start.ps1` + tunnel are both running. URL must be HTTPS. |
-| **Permission popup every call** | Settings → Apps → set connector to *Ask before important changes*. Don't use popup "Always allow". |
-| **Tool denied by policy or client safety checks** | Inspect the denial and current task policy. Do not retry through another tool to bypass it. |
-| **`stream canceled`** in tunnel log | Server/tunnel restarted mid-session → refresh connector, new chat. |
-| **Tunnel URL keeps changing** | Switch to OpenAI Secure Tunnel (`openai-tunnel.bat`). |
-| **Access denied** | Wrong path or OS permissions on that file. |
-| **git not found** | Install [Git](https://git-scm.com). |
+Recommended local setup:
 
-See also [AGENTS.md](AGENTS.md) for agent onboarding and `apply_patch` format.
+```text
+origin   https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
+upstream https://github.com/hoangcoderr/chatgpt-local-coder.git
+```
 
-## 📚 References
+Fetch upstream changes with:
 
-- [Model Context Protocol](https://modelcontextprotocol.io)
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
-- [ChatGPT Apps SDK](https://developers.openai.com/apps-sdk)
-- [OpenAI Secure MCP Tunnel](https://platform.openai.com/docs/guides/secure-mcp-tunnel)
+```powershell
+git fetch upstream
+```
 
-## 📄 License
+Review upstream changes before merging or rebasing them into your development branch. This fork has diverged substantially, so upstream updates should not be assumed to apply cleanly.
 
-[MIT](LICENSE) — use freely, attribution appreciated.
+## Upstream and project history
 
-## ⭐ Support
+This repository is a fork of:
 
-If this saves you time, **star the repo** — it helps others find it.
+- **Original project:** [`hoangcoderr/chatgpt-local-coder`](https://github.com/hoangcoderr/chatgpt-local-coder)
+- **Current fork:** [`Mieruko/MCP_Plugins_With_ChatGPTWeb`](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb)
+
+The original project provided the initial MIT-licensed codebase. The current fork contains substantial additional development, including the Workbench architecture and workflows described above.
+
+Upstream attribution is intentionally retained where required by the MIT License. GitHub fork metadata and license attribution describe project ancestry; they do not imply that upstream authors authored the later modifications in this fork.
+
+## License
+
+This project is distributed under the **MIT License**. See [`LICENSE`](LICENSE).
+
+The license file retains the upstream copyright notice required for code derived from the original MIT-licensed project and adds a notice for modifications made in this fork.
 
 ---
 
-## 🇻🇳 Tiếng Việt
+<div align="center">
 
-**ChatGPT Local Coder** biến ChatGPT web thành agent code trên máy bạn qua MCP.
+**MCP Plugins With ChatGPT Web** · maintained in the `Mieruko/MCP_Plugins_With_ChatGPTWeb` fork
 
-```powershell
-git clone https://github.com/hoangcoderr/chatgpt-local-coder.git
-cd chatgpt-local-coder
-copy .env.example .env
-npm install && npm run build
-.\start.ps1                    # terminal 1
-.\openai-tunnel.bat            # terminal 2 (tunnel cố định)
-```
-
-**ChatGPT:** Settings → Connectors → tạo connector → chọn tunnel → Refresh → chat mới.
-
-**Bắt buộc tag connector mỗi chat:** Chat mới → **+** → **More** → bật connector, hoặc gõ **`@`** + tên connector trong ô chat. Nếu không tag, ChatGPT báo *"Đang tìm các công cụ có sẵn"* rồi *"Lỗi trong luồng tin nhắn"* — **server không có log lỗi** vì MCP chưa được gọi.
-
-**WORKSPACE_PATH:** đặt đúng thư mục project (không phải thư mục `chatgpt-local-coder`). Server tự đọc `CLAUDE.md` / `AGENTS.md` giống Claude Code.
-
-**Lưu ý:** Không bấm **"Luôn cho phép"** trên popup — cấu hình quyền ở Settings → Apps. Sau khi restart server: Refresh connector + mở chat mới + tag lại connector.
-
-Chi tiết cho AI agent: [AGENTS.md](AGENTS.md)
-
-# MCP_Plugins_With_ChatGPTWeb
+</div>
