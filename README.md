@@ -81,32 +81,62 @@ Clone **this fork**:
 ```powershell
 git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
 cd MCP_Plugins_With_ChatGPTWeb
-Copy-Item .env.example .env
 npm install
-npm run build
-.\start.ps1
+npm start
 ```
 
-Default services from `.env.example`:
+`npm start` is the normal launcher. On first run it opens a setup wizard, then builds when needed, starts MCP + Workbench, starts the selected tunnel, opens the Workbench, and stops its child processes when you exit.
+
+The first-run wizard asks for the workspace and one connection mode:
+
+- **Cloudflare Quick Tunnel** — easiest setup; the wizard can install `cloudflared` automatically. Use ChatGPT **Server URL + OAuth**. The public URL changes each run.
+- **OpenAI Secure MCP Tunnel** — stable tunnel identity. The wizard installs `tunnel-client`, asks for Tunnel ID / Runtime API key / optional organization ID, and validates basic tunnel access. The Runtime key needs **Tunnels Read + Use**. Use ChatGPT **Tunnel + No Auth**.
+- **Local only** — Workbench/MCP stay local and no public tunnel is started.
+
+The wizard creates/updates `.env` for you. Reconfigure at any time with:
+
+```powershell
+npm run setup
+# or configure and immediately start
+npm start -- --setup
+```
+
+OpenAI Tunnel is self-healing for local client problems: if `tunnel-client` is
+missing, damaged, or an older bundled version is present, `npm start` repairs it
+without asking for the Tunnel ID or Runtime key again. If OpenAI instead rejects
+the configured tunnel/key/organization, the running launcher opens a focused
+repair flow and keeps the local MCP + Workbench alive.
+
+You can open that repair flow manually with:
+
+```powershell
+npm run repair:tunnel
+```
+
+The repair flow only changes the tunnel setting you choose. Workspace and UI
+settings are preserved. It can replace the Runtime key, select another Tunnel
+ID, set the owning organization, or fall back to Cloudflare/local-only.
+
+Default services:
 
 ```text
 MCP server:  http://localhost:3000
 Workbench:   http://127.0.0.1:3001/ui/workbench.html
 ```
 
-You can change `PORT` and `ADMIN_PORT` if those ports are already in use.
+If a default port is already in use, the launcher automatically selects a nearby free port. You can still set `PORT` and `ADMIN_PORT` to choose preferred starting ports.
 
 ### Important environment settings
 
 ```dotenv
 PORT=3000
 ADMIN_PORT=3001
-WORKSPACE_PATH=C:\Users\YourName\projects\my-app
+# WORKSPACE_PATH=D:\projects\my-app
 CHATGPT_TOOL_PROFILE=slim
 WORKBENCH_DEFAULT_MODE=ask
 ```
 
-`WORKSPACE_PATH` is the bootstrap/default project. Additional projects can be registered directly from the Workbench with **Add workspace**; they do not require a server restart.
+`WORKSPACE_PATH` is optional. Additional projects can be registered directly from the Workbench with **Add workspace**; they do not require a server restart.
 
 Do not commit your real `.env`, credentials, tokens or Workbench state.
 
@@ -147,25 +177,46 @@ The Workbench currently provides:
 ### 1. Start the local server
 
 ```powershell
-.\start.ps1 -Force
+npm start
 ```
 
-### 2. Expose the MCP endpoint through HTTPS
+### 2. Choose the connection during setup
 
 The admin/Workbench port should stay local. Only expose the MCP service.
 
-For a stable OpenAI tunnel, initialize once and then run the provided tunnel helper:
+The setup wizard owns the normal tunnel configuration. New users do not need to manually create `.env`, run a separate Cloudflare terminal, or remember the old tunnel helper sequence.
+
+For Cloudflare mode, `npm start` launches the Quick Tunnel and injects its current HTTPS origin into MCP OAuth metadata automatically.
+
+For OpenAI mode, `npm start` launches the configured stable tunnel and prints a prominent diagnostic if the Runtime API key lacks tunnel **Use** permission or the tunnel requires a different organization context.
+
+For those known OpenAI errors, an interactive terminal automatically opens the
+same repair flow. Fixing the Runtime key, Tunnel ID, or organization restarts
+only `tunnel-client`; the local MCP server and Workbench stay running. Switching
+connection type to Cloudflare or local-only is saved and takes effect on the
+next `npm start`, because the MCP public OAuth origin must be chosen before the
+server boots.
+
+When using OpenAI Secure MCP Tunnel in ChatGPT, select **Connection: Tunnel** and **Authentication: None**. The launcher-generated tunnel profile attaches the Workbench's local MCP Bearer token on the private hop from `tunnel-client` to `127.0.0.1`, so the local MCP server remains authenticated without exposing its OAuth authorization server. Do not select OAuth or Mixed for this tunnel connection: Secure MCP Tunnel forwards MCP traffic, but the local OAuth authorization/token endpoints are not automatically exposed through that tunnel.
+
+If OpenAI reports `tunnel_active_organization_required`, set `CONTROL_PLANE_ORGANIZATION_ID=org_...` in `.env` to the organization that owns that tunnel. The launcher propagates this into the generated tunnel-client profile.
+
+Launcher overrides are available when needed:
 
 ```powershell
-.\openai-tunnel-init.bat
-.\openai-tunnel.bat
+npm start -- --setup        # run setup wizard again, then start
+npm start -- --cloudflare   # prefer Cloudflare Quick Tunnel
+npm start -- --openai       # prefer configured OpenAI Tunnel
+npm start -- --no-tunnel    # local Workbench only
+npm start -- --no-open      # do not open the browser automatically
+npm start -- --no-setup     # skip setup checks (automation/advanced use)
 ```
 
-A Cloudflare tunnel helper is also included for development/testing where a changing public URL is acceptable.
+The older `start.ps1`, `openai-tunnel.bat`, and `tunnel.ps1` helpers remain available for manual/advanced workflows.
 
 ### 3. Configure ChatGPT
 
-Configure the MCP connector to use the public HTTPS MCP endpoint and OAuth. When OAuth approval is requested, review and approve the matching request from your local Workbench.
+For Cloudflare/public HTTPS mode, configure the MCP endpoint with OAuth and approve the matching request from your local Workbench. For OpenAI Secure MCP Tunnel mode, choose the tunnel connection itself and **Authentication: None**; do not paste the `tunnel-service.../v1/mcp/tunnel_...` URL into the normal OAuth endpoint field.
 
 After server/tool changes, refresh the connector and start a new ChatGPT conversation so the client receives the current tool schema.
 

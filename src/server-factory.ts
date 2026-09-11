@@ -66,6 +66,26 @@ export function createMcpServer(
   applyToolProfile(server);
   installWorkbench(server, workspaceRoot, pinnedTaskId, pinnedSessionId);
 
+  // ChatGPT may probe resources/list while scanning a custom MCP app. Expose a
+  // tiny stable resource so connector discovery succeeds even though this
+  // server is primarily tool-oriented.
+  server.registerResource(
+    "local-coder-about",
+    "local-coder://about",
+    {
+      title: "Local Coder MCP",
+      description: "Identifies the local coding Workbench MCP server.",
+      mimeType: "text/plain",
+    },
+    async () => ({
+      contents: [{
+        uri: "local-coder://about",
+        mimeType: "text/plain",
+        text: "Local Coder Workbench MCP server for files, shell, Git, review, checkpoints, and workspace tools.",
+      }],
+    })
+  );
+
   registerFilesystemTools(server);
   registerInspectTools(server, workspaceRoot);
   registerShellTools(server, workspaceRoot, shellTimeout);
