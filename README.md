@@ -10,6 +10,7 @@ Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Di
 [![ChatGPT](https://img.shields.io/badge/ChatGPT-Web-10a37f?style=flat-square)](https://chatgpt.com)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/Mieruko/MCP_Plugins_With_ChatGPTWeb?style=flat-square&logo=github)](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/stargazers)
 
 [Quick Start](#quick-start) · [Workbench](#workbench) · [ChatGPT](#connect-chatgpt) · [GitHub](#github-integration) · [Security](#permissions-and-security) · [Upstream](#upstream-and-project-history)
 
@@ -42,6 +43,14 @@ The current project adds and develops features such as:
 - local admin/control APIs protected from non-local access.
 
 The Workbench and MCP server use the same underlying task, permission and tool execution model rather than maintaining two independent implementations.
+
+## Star History
+
+<div align="center">
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Mieruko/MCP_Plugins_With_ChatGPTWeb&type=Date)](https://star-history.com/#Mieruko/MCP_Plugins_With_ChatGPTWeb&Date)
+
+</div>
 
 ## Architecture
 
