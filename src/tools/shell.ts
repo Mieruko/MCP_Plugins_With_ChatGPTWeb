@@ -68,12 +68,12 @@ async function waitForManagedExit(item: ManagedProcess, ms = 1500): Promise<bool
   return item.finished;
 }
 
-async function taskkill(pid: number, force: boolean): Promise<void> {
-  await new Promise<void>(resolve => {
+async function taskkill(pid: number, force: boolean): Promise<boolean> {
+  return await new Promise<boolean>(resolve => {
     const args = ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
     const killer = spawn("taskkill", args, { windowsHide: true, stdio: "ignore" });
-    killer.once("close", () => resolve());
-    killer.once("error", () => resolve());
+    killer.once("close", code => resolve(code === 0));
+    killer.once("error", () => resolve(false));
   });
 }
 
@@ -85,12 +85,33 @@ async function terminateManagedProcess(item: ManagedProcess, force: boolean): Pr
     return;
   }
   if (process.platform === "win32" && item.child.pid) {
+    const ageMs = Date.now() - Date.parse(item.startedAt);
+    if (ageMs < 180) {
+      await new Promise(resolve => setTimeout(resolve, 180 - ageMs));
+      if (item.finished) return;
+    }
     // Killing powershell.exe alone can orphan the actual dev server. taskkill /T
     // terminates the whole process tree; try graceful first, then force if needed.
     await taskkill(item.child.pid, force);
-    if (!await waitForManagedExit(item, force ? 1800 : 900) && !force) {
-      await taskkill(item.child.pid, true);
-      await waitForManagedExit(item, 1800);
+    if (!await waitForManagedExit(item, force ? 1800 : 900)) {
+      if (!force) {
+        await taskkill(item.child.pid, true);
+        await waitForManagedExit(item, 1800);
+      } else {
+        // A force stop must not report success until the managed shell has
+        // actually exited. Retrying /T /F closes a race where taskkill can
+        // return before a freshly-spawned child process is fully attached.
+        await taskkill(item.child.pid, true);
+        await waitForManagedExit(item, 1800);
+      }
+    }
+    // taskkill /T /F can finish just before Node emits the wrapper's `close`
+    // event. Do one last direct kill/wait so the API only returns after the
+    // managed wrapper has observed termination, without turning a successful
+    // tree kill into a false HTTP 400.
+    if (!item.finished) {
+      try { item.child.kill(); } catch {}
+      await waitForManagedExit(item, 1000);
     }
     return;
   }

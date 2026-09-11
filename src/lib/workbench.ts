@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { executionContext } from "./workbench-context.js";
+import { childEnvironment, executionContext } from "./workbench-context.js";
 import { validatePath } from "./path-security.js";
 import { applyUnifiedPatchToText, buildSimpleDiff, isMultiFilePatch, parseMultiFilePatch } from "./patch.js";
 import { gitApprovalFingerprint } from "./git-approval.js";
@@ -14,7 +15,15 @@ export type Args = Record<string, any>;
 export interface Policy { mode: PermissionMode; workspaceOnly: boolean; revision: number }
 export interface TaskPreview { command: string; url: string; processId?: string; startedAt?: string }
 export interface Workspace { id: string; name: string; path: string; createdAt: string; lastOpenedAt: string }
-export interface Task { id: string; workspaceId: string; title: string; workspace: string; createdAt: string; policy: Policy; preview?: TaskPreview }
+export interface TaskExecution {
+  mode: "local" | "worktree";
+  path: string;
+  startingRef?: string;
+  branch?: string;
+  detached?: boolean;
+  managed?: boolean;
+}
+export interface Task { id: string; workspaceId: string; title: string; workspace: string; execution: TaskExecution; createdAt: string; policy: Policy; preview?: TaskPreview }
 export interface TaskCheckpoint { id: string; taskId: string; title: string; createdAt: string; operationIndex: number }
 interface Snapshot { kind: "missing" | "file" | "directory"; content?: string; mode?: number }
 export interface Change { path: string; before: Snapshot; after: Snapshot; undone?: boolean }
@@ -34,13 +43,13 @@ export interface OperationReview {
   warning?: string;
 }
 export interface Operation {
-  id: string; taskId: string; sessionId?: string; tool: string; args: Args; createdAt: string; expiresAt: number;
+  id: string; taskId: string; sessionId?: string; changeSetId?: string; tool: string; args: Args; createdAt: string; expiresAt: number;
   policyRevision: number; status: "pending" | "running" | "completed" | "failed" | "denied" | "expired" | "interrupted";
   changes: Change[]; error?: string; result?: unknown;
   review?: OperationReview;
   tracking: "file-tools" | "external-effects-not-tracked";
 }
-interface State { version: 2; workspaces: Workspace[]; tasks: Task[]; operations: Operation[]; checkpoints?: TaskCheckpoint[]; selectedWorkspaceId?: string; selectedTaskId?: string; sessionTasks?: Record<string, string> }
+interface State { version: 3; workspaces: Workspace[]; tasks: Task[]; operations: Operation[]; checkpoints?: TaskCheckpoint[]; selectedWorkspaceId?: string; selectedTaskId?: string; sessionTasks?: Record<string, string> }
 const events = new EventEmitter();
 export type WorkbenchChangeScope = "state" | "workspaces" | "tasks" | "operations" | "checkpoints" | "workspace";
 export interface WorkbenchChange {
@@ -57,6 +66,7 @@ let initialization: Promise<void> | undefined;
 let globalQueue = Promise.resolve();
 let saveQueue = Promise.resolve();
 const workspaceQueues = new Map<string, Promise<void>>();
+const activeChangeSets = new Map<string, { id: string; startedAt: number; lastAt: number }>();
 const MAX_BYTES = 32 * 1024 * 1024;
 const MAX_FILES = 2000;
 
@@ -96,15 +106,52 @@ function createWorkspaceRecord(root: string, name?: string, createdAt = new Date
   state.workspaces.push(workspace);
   return workspace;
 }
+
+export function taskExecutionPath(task: Pick<Task, "workspace" | "execution">): string {
+  return task.execution?.path || task.workspace;
+}
+
+function localExecution(workspace: string): TaskExecution {
+  return { mode: "local", path: workspace, managed: false, detached: false };
+}
+
+async function runControlGit(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["--no-pager", "-c", "core.fsmonitor=false", ...args], {
+      cwd,
+      windowsHide: true,
+      env: { ...childEnvironment(), GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "false", GIT_SEQUENCE_EDITOR: "false" },
+    });
+    let stdout = "", stderr = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Git environment operation timed out")); }, 120_000);
+    child.stdout.on("data", chunk => { stdout = (stdout + chunk.toString()).slice(-200000); });
+    child.stderr.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-200000); });
+    child.once("error", () => { clearTimeout(timer); reject(new Error("git not found. Install Git for Windows.")); });
+    child.once("close", code => {
+      clearTimeout(timer);
+      if ((code ?? 1) !== 0) reject(new Error(stderr.trim() || stdout.trim() || `git exited with code ${code}`));
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+async function managedWorktreePath(workspaceId: string, taskId: string): Promise<string> {
+  const root = path.join(path.dirname(workbenchRoot()), "worktrees", workspaceId);
+  await fs.mkdir(root, { recursive: true });
+  return path.join(root, taskId);
+}
 async function normalizeLoadedState(raw: any): Promise<State> {
   if (!raw || !Array.isArray(raw.tasks) || !Array.isArray(raw.operations)) throw new Error("Invalid workbench state");
-  if (raw.version === 2 && Array.isArray(raw.workspaces)) {
+  if ((raw.version === 2 || raw.version === 3) && Array.isArray(raw.workspaces)) {
     const next = raw as State;
+    next.version = 3;
     next.checkpoints ??= [];
     for (const task of next.tasks) {
       const existing = next.workspaces.find(item => item.id === task.workspaceId)
         || next.workspaces.find(item => workspacePathKey(item.path) === workspacePathKey(task.workspace));
       if (existing) { task.workspaceId = existing.id; task.workspace = existing.path; }
+      task.execution ??= localExecution(task.workspace);
+      if (task.execution.mode === "local") task.execution.path = task.workspace;
     }
     if (!next.selectedWorkspaceId && next.selectedTaskId) next.selectedWorkspaceId = next.tasks.find(item => item.id === next.selectedTaskId)?.workspaceId;
     if (!next.selectedWorkspaceId) next.selectedWorkspaceId = next.workspaces[0]?.id;
@@ -112,7 +159,7 @@ async function normalizeLoadedState(raw: any): Promise<State> {
   }
   if (raw.version !== 1) throw new Error("Invalid workbench state");
   const migrated: State = {
-    version: 2,
+    version: 3,
     workspaces: [],
     tasks: [],
     operations: raw.operations,
@@ -121,12 +168,12 @@ async function normalizeLoadedState(raw: any): Promise<State> {
     sessionTasks: raw.sessionTasks || {},
   };
   state = migrated;
-  for (const legacyTask of raw.tasks as Array<Omit<Task, "workspaceId">>) {
+  for (const legacyTask of raw.tasks as Array<Omit<Task, "workspaceId" | "execution"> & { execution?: TaskExecution }>) {
     let root: string;
     try { root = await canonicalWorkspacePath(legacyTask.workspace); }
     catch { root = path.resolve(legacyTask.workspace); }
     const workspace = findWorkspaceByPath(root) || createWorkspaceRecord(root, workspaceNameFromPath(root), legacyTask.createdAt);
-    migrated.tasks.push({ ...legacyTask, workspace: root, workspaceId: workspace.id });
+    migrated.tasks.push({ ...legacyTask, workspace: root, workspaceId: workspace.id, execution: legacyTask.execution || localExecution(root) });
   }
   migrated.selectedWorkspaceId = migrated.tasks.find(item => item.id === migrated.selectedTaskId)?.workspaceId || migrated.workspaces[0]?.id;
   return migrated;
@@ -161,7 +208,7 @@ async function init(): Promise<void> {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      state = { version: 2, workspaces: [], tasks: [], operations: [], checkpoints: [] };
+      state = { version: 3, workspaces: [], tasks: [], operations: [], checkpoints: [] };
     }
     await save();
   })();
@@ -176,7 +223,7 @@ export async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 function workspaceLockKey(taskId: string): string {
-  const workspace = taskById(taskId).workspace;
+  const workspace = taskExecutionPath(taskById(taskId));
   return process.platform === "win32" ? workspace.toLowerCase() : workspace;
 }
 
@@ -248,7 +295,12 @@ export async function selectWorkspace(id: string): Promise<void> {
     await save({ scopes: ["workspaces", "tasks"], taskId: task?.id, reason: "workspace-selected" });
   });
 }
-export async function createTask(title: string, workspacePath?: string, workspaceId?: string): Promise<Task> {
+export async function createTask(
+  title: string,
+  workspacePath?: string,
+  workspaceId?: string,
+  environment?: { mode?: "local" | "worktree"; startingRef?: string },
+): Promise<Task> {
   return exclusive(async () => {
     let workspace: Workspace;
     if (workspaceId) workspace = workspaceById(workspaceId);
@@ -258,7 +310,22 @@ export async function createTask(title: string, workspacePath?: string, workspac
       workspace = findWorkspaceByPath(root) || createWorkspaceRecord(root);
     }
     const mode: PermissionMode = process.env.WORKBENCH_DEFAULT_MODE === "full" ? "full" : process.env.WORKBENCH_DEFAULT_MODE === "auto" ? "auto" : "ask";
-    const task: Task = { id: randomUUID(), workspaceId: workspace.id, title: title.slice(0, 200), workspace: workspace.path, createdAt: new Date().toISOString(),
+    const taskId = randomUUID();
+    let execution = localExecution(workspace.path);
+    if (environment?.mode === "worktree") {
+      const startingRef = (environment.startingRef || "HEAD").trim() || "HEAD";
+      await runControlGit(workspace.path, ["rev-parse", "--verify", `${startingRef}^{commit}`]);
+      const target = await managedWorktreePath(workspace.id, taskId);
+      try {
+        await fs.rm(target, { recursive: true, force: true });
+        await runControlGit(workspace.path, ["worktree", "add", "--detach", target, startingRef]);
+      } catch (error) {
+        await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+      execution = { mode: "worktree", path: await fs.realpath(target), startingRef, detached: true, managed: true };
+    }
+    const task: Task = { id: taskId, workspaceId: workspace.id, title: title.slice(0, 200), workspace: workspace.path, execution, createdAt: new Date().toISOString(),
       policy: { mode, workspaceOnly: mode !== "full", revision: 1 } };
     state.tasks.push(task);
     state.selectedWorkspaceId ??= workspace.id;
@@ -302,7 +369,7 @@ export async function resolveDefaultTask(workspace: string): Promise<string> {
     const existing = state.tasks.find(item => item.workspaceId === selectedWorkspace!.id);
     if (existing) { state.selectedTaskId = existing.id; return existing.id; }
     const mode: PermissionMode = process.env.WORKBENCH_DEFAULT_MODE === "full" ? "full" : process.env.WORKBENCH_DEFAULT_MODE === "auto" ? "auto" : "ask";
-    const task: Task = { id: randomUUID(), workspaceId: selectedWorkspace.id, title: "Default project", workspace: selectedWorkspace.path, createdAt: new Date().toISOString(),
+    const task: Task = { id: randomUUID(), workspaceId: selectedWorkspace.id, title: "Default project", workspace: selectedWorkspace.path, execution: localExecution(selectedWorkspace.path), createdAt: new Date().toISOString(),
       policy: { mode, workspaceOnly: mode !== "full", revision: 1 } };
     state.tasks.push(task);
     state.selectedTaskId = task.id;
@@ -381,6 +448,7 @@ interface CheckpointRestorePlan {
 
 async function buildCheckpointRestorePlan(checkpoint: TaskCheckpoint): Promise<{ plan: CheckpointRestorePlan; targets: Map<string, Snapshot>; reversed: Change[] }> {
   const task = taskById(checkpoint.taskId);
+  const executionRoot = taskExecutionPath(task);
   const operations = state.operations.slice(checkpoint.operationIndex).filter(op => op.taskId === task.id && ["completed", "failed"].includes(op.status));
   const externalEffects = operations.filter(op => op.tracking === "external-effects-not-tracked")
     .map(op => ({ id: op.id, tool: op.tool, status: op.status }));
@@ -389,7 +457,7 @@ async function buildCheckpointRestorePlan(checkpoint: TaskCheckpoint): Promise<{
   const current = new Map<string, Snapshot>();
   const targets = new Map<string, Snapshot>();
   const reversed: Change[] = [];
-  await executionContext.run({ taskId: task.id, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: checkpoint.id, capture: async () => {} }, async () => {
+  await executionContext.run({ taskId: task.id, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: checkpoint.id, capture: async () => {} }, async () => {
     for (const filePath of paths) {
       await validatePath(filePath);
       const value = await snapshot(filePath);
@@ -444,7 +512,8 @@ export async function restoreTaskCheckpoint(id: string): Promise<CheckpointResto
         return a.kind === "missing" ? pathB.length - pathA.length : pathA.length - pathB.length;
       });
     const task = taskById(checkpoint.taskId);
-    await executionContext.run({ taskId: task.id, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: checkpoint.id, capture: async () => {} }, async () => {
+    const executionRoot = taskExecutionPath(task);
+    await executionContext.run({ taskId: task.id, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: checkpoint.id, capture: async () => {} }, async () => {
       for (const [filePath, target] of ordered) { await validatePath(filePath); await restore(filePath, target); }
     });
     for (const change of reversed) change.undone = true;
@@ -461,10 +530,41 @@ export async function restoreTaskCheckpoint(id: string): Promise<CheckpointResto
 // Classification is conservative and independent of model-supplied annotations.
 const READ_TOOLS = new Set(["inspect_code", "read_text_file", "read_multiple_files", "list_directory", "glob", "grep", "search_files", "directory_tree", "get_file_info", "list_allowed_directories", "agent_status", "project_context", "load_path_rules", "shell_status", "process_status", "process_output", "mcp_servers", "mcp_tools"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch", "replace_regex", "create_directory", "copy_file", "move_file", "remember"]);
+const CHANGE_SET_TOOLS = new Set([...EDIT_TOOLS, "delete_file", "delete_directory"]);
+const CHANGE_SET_IDLE_MS = Math.max(5_000, Number(process.env.WORKBENCH_CHANGE_SET_IDLE_MS || 45_000));
+const CHANGE_SET_MAX_MS = Math.max(CHANGE_SET_IDLE_MS, Number(process.env.WORKBENCH_CHANGE_SET_MAX_MS || 10 * 60_000));
+
+function changeSetKey(taskId: string, sessionId: string): string {
+  return `${taskId}:${sessionId}`;
+}
+
+function operationChangeSetId(taskId: string, sessionId: string | undefined, tool: string, operationId: string): string {
+  if (!sessionId || !CHANGE_SET_TOOLS.has(tool)) return operationId;
+  const key = changeSetKey(taskId, sessionId);
+  const now = Date.now();
+  const current = activeChangeSets.get(key);
+  const currentWasRestored = current
+    ? state.operations.some(op => op.changeSetId === current.id && op.changes.some(change => change.undone))
+    : false;
+  if (!current || currentWasRestored || now - current.lastAt > CHANGE_SET_IDLE_MS || now - current.startedAt > CHANGE_SET_MAX_MS) {
+    const next = { id: randomUUID(), startedAt: now, lastAt: now };
+    activeChangeSets.set(key, next);
+    return next.id;
+  }
+  current.lastAt = now;
+  return current.id;
+}
+
+function touchChangeSet(op: Operation): void {
+  if (!op.sessionId || !op.changeSetId || !CHANGE_SET_TOOLS.has(op.tool)) return;
+  const current = activeChangeSets.get(changeSetKey(op.taskId, op.sessionId));
+  if (current?.id === op.changeSetId) current.lastAt = Date.now();
+}
 export function isReadOperation(tool: string, args: Args): boolean {
   return READ_TOOLS.has(tool) || ["git_status", "git_diff", "git_log"].includes(tool)
     || tool === "github" && ["pr_list", "pr_view", "pr_checks", "issue_list", "issue_view"].includes(args.action)
     || (["git_branch", "git_stash"].includes(tool) && (args.action || "list") === "list")
+    || (tool === "git_worktree" && (args.action || "list") === "list")
     || (tool === "rewind" && ["list", "preview", "status"].includes(args.action));
 }
 export function isProcessOperation(tool: string): boolean {
@@ -473,7 +573,7 @@ export function isProcessOperation(tool: string): boolean {
 }
 const SANDBOX_PROCESS_TOOLS = new Set([
   "run_command", "start_process",
-  "git_status", "git_diff", "git_log", "git_add", "git_commit", "git_branch", "git_checkout", "git_restore", "git_stash", "git_reset", "git_unstage",
+  "git_status", "git_diff", "git_log", "git_init", "git_add", "git_commit", "git_branch", "git_checkout", "git_restore", "git_stash", "git_reset", "git_unstage", "git_worktree",
 ]);
 const WORKSPACE_CONTROL_TOOLS = new Set(["shell_reset", "stop_process", "clear_processes", "rewind"]);
 async function assertWorkspaceOperationAllowed(tool: string): Promise<void> {
@@ -549,7 +649,8 @@ function buildCompletedOperationReview(changes: Change[]): OperationReview | und
 }
 async function buildOperationReview(task: Task, tool: string, args: Args, expected: Map<string, Snapshot>): Promise<OperationReview | undefined> {
   const files: OperationReviewFile[] = [];
-  const resolved = async (value: string) => await validatePath(path.resolve(task.workspace, value));
+  const executionRoot = taskExecutionPath(task);
+  const resolved = async (value: string) => await validatePath(path.resolve(executionRoot, value));
   const addText = (target: string, operation: OperationReviewFile["operation"], after: string | undefined, note?: string) => {
     files.push(reviewFile(target, operation, snapshotText(expected.get(target)), after, note));
   };
@@ -581,7 +682,7 @@ async function buildOperationReview(task: Task, tool: string, args: Args, expect
       }
     } else if (tool === "apply_patch") {
       if (isMultiFilePatch(args.patch || "")) {
-        let base = args.path ? await validatePath(args.path) : task.workspace;
+        let base = args.path ? await validatePath(args.path) : executionRoot;
         try { if (!(await fs.stat(base)).isDirectory()) base = path.dirname(base); } catch { base = path.dirname(base); }
         for (const edit of parseMultiFilePatch(args.patch, base)) {
           const before = snapshotText(expected.get(edit.path));
@@ -633,34 +734,39 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
   // Waiting for process output must not lock writes or other tasks behind it.
   if (isReadOperation(tool, args)) {
     const task = structuredClone(taskById(taskId));
+    const executionRoot = taskExecutionPath(task);
     if (task.policy.workspaceOnly) {
       await assertWorkspaceOperationAllowed(tool);
     }
-    return executionContext.run({ taskId, sessionId, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: randomUUID(), capture: async () => {} }, invoke);
+    return executionContext.run({ taskId, sessionId, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: randomUUID(), capture: async () => {} }, invoke);
   }
   return workspaceExclusive(taskId, async () => {
     const task = taskById(taskId);
+    const executionRoot = taskExecutionPath(task);
     if (task.policy.workspaceOnly) {
       await assertWorkspaceOperationAllowed(tool);
       if (!isProcessOperation(tool) && !READ_TOOLS.has(tool) && !EDIT_TOOLS.has(tool) && !["delete_file", "delete_directory", ...WORKSPACE_CONTROL_TOOLS].includes(tool)) {
         throw new Error("WORKSPACE_SCOPE_BLOCKED: this operation is not classified as safe for workspace-only mode");
       }
     }
-    const op: Operation = { id: randomUUID(), taskId, ...(sessionId ? { sessionId } : {}), tool, args: structuredClone(args), createdAt: new Date().toISOString(),
+    const operationId = randomUUID();
+    const changeSetId = operationChangeSetId(taskId, sessionId, tool, operationId);
+    if (sessionId && !CHANGE_SET_TOOLS.has(tool)) activeChangeSets.delete(changeSetKey(taskId, sessionId));
+    const op: Operation = { id: operationId, taskId, ...(sessionId ? { sessionId } : {}), changeSetId, tool, args: structuredClone(args), createdAt: new Date().toISOString(),
       expiresAt: Date.now() + 15 * 60_000, policyRevision: task.policy.revision, status: "pending", changes: [],
       tracking: isProcessOperation(tool) ? "external-effects-not-tracked" : "file-tools" };
-    const boundary = { taskId, sessionId, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: op.id, capture: async (_paths: string[]) => {} };
+    const boundary = { taskId, sessionId, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: op.id, capture: async (_paths: string[]) => {} };
     const expected = new Map<string, Snapshot>();
-    const gitCwd = tool.startsWith("git_") ? await executionContext.run(boundary, () => validatePath(args.path || task.workspace)) : undefined;
+    const gitCwd = tool.startsWith("git_") ? await executionContext.run(boundary, () => validatePath(args.path || executionRoot)) : undefined;
     const gitBefore = gitCwd && !human && task.policy.mode !== "full"
       ? await executionContext.run(boundary, () => gitApprovalFingerprint(gitCwd, args.branch))
       : undefined;
     if (!isReadOperation(tool, args) && !isProcessOperation(tool)) {
       await executionContext.run(boundary, async () => {
-        const targets = [args.path, args.source, args.destination].filter((p): p is string => typeof p === "string").map(p => path.resolve(task.workspace, p));
-        if (tool === "remember") targets.push(path.join(task.workspace, ".local-coder", "MEMORY.md"));
+        const targets = [args.path, args.source, args.destination].filter((p): p is string => typeof p === "string").map(p => path.resolve(executionRoot, p));
+        if (tool === "remember") targets.push(path.join(executionRoot, ".local-coder", "MEMORY.md"));
         if (tool === "apply_patch" && isMultiFilePatch(args.patch || "")) {
-          let base = args.path ? await validatePath(args.path) : task.workspace;
+          let base = args.path ? await validatePath(args.path) : executionRoot;
           if (!(await fs.stat(base)).isDirectory()) base = path.dirname(base);
           targets.splice(0, targets.length, ...parseMultiFilePatch(args.patch, base).map(o => o.path));
         }
@@ -670,7 +776,7 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
     }
     const execute = async () => {
       const before = new Map<string, Snapshot>();
-      const context = { taskId, sessionId, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: op.id,
+      const context = { taskId, sessionId, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: op.id,
         capture: async (paths: string[]) => {
           for (const p of paths) await captureTree(await validatePath(p), before);
           op.changes = [...before].map(([p, s]) => ({ path: p, before: s, after: s }));
@@ -701,13 +807,14 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
           if (op.tracking === "file-tools") op.review = buildCompletedOperationReview(op.changes);
         } catch (error) { op.status = "failed"; op.error = `Tracking incomplete: ${error}`; }
         op.result = result;
+        touchChangeSet(op);
         await save({ scopes: ["operations", "workspace"], taskId, operationId: op.id, reason: "operation-finished" });
       }
       if (op.error) throw new Error(op.error);
       return result;
     };
     const read = isReadOperation(tool, args);
-    if (read) return executionContext.run({ taskId, sessionId, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: op.id, capture: async () => {} }, invoke);
+    if (read) return executionContext.run({ taskId, sessionId, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: op.id, capture: async () => {} }, invoke);
     state.operations.push(op);
     const auto = task.policy.mode === "full" || task.policy.mode === "auto" && EDIT_TOOLS.has(tool);
     if (!human && !auto) {
@@ -736,10 +843,95 @@ export async function decideOperation(id: string, approve: boolean): Promise<unk
 }
 export async function operationDetail(id: string) {
   await init();
-    const op = state.operations.find(o => o.id === id);
-    if (!op) throw new Error("Unknown operation");
-    return structuredClone(op);
+  const op = state.operations.find(o => o.id === id);
+  if (!op) throw new Error("Unknown operation");
+  return structuredClone(op);
 }
+
+function changeSetMembers(id: string): Operation[] {
+  const grouped = state.operations.filter(op => op.changeSetId === id);
+  if (grouped.length) return grouped.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const legacy = state.operations.find(op => op.id === id && !op.changeSetId);
+  return legacy ? [legacy] : [];
+}
+
+function aggregateChangeSetChanges(operations: Operation[]): Change[] {
+  const byPath = new Map<string, Change>();
+  for (const op of operations) {
+    if (op.tracking !== "file-tools" || !["completed", "failed"].includes(op.status)) continue;
+    for (const change of op.changes) {
+      const current = byPath.get(change.path);
+      if (!current) byPath.set(change.path, { path: change.path, before: change.before, after: change.after });
+      else current.after = change.after;
+    }
+  }
+  return [...byPath.values()].filter(change => fingerprint(change.before) !== fingerprint(change.after));
+}
+
+function buildChangeSetDetail(id: string) {
+  const operations = changeSetMembers(id);
+  if (!operations.length) throw new Error("Unknown change set");
+  const taskId = operations[0].taskId;
+  if (operations.some(op => op.taskId !== taskId)) throw new Error("Change set spans multiple tasks");
+  const reversible = operations.filter(op => op.tracking === "file-tools" && ["completed", "failed"].includes(op.status) && op.changes.length);
+  const records = reversible.flatMap(op => op.changes);
+  const anyUndone = records.some(change => !!change.undone);
+  const anyActive = records.some(change => !change.undone);
+  const blocked = operations.some(op => ["pending", "running"].includes(op.status));
+  const changes = aggregateChangeSetChanges(operations);
+  const review = buildCompletedOperationReview(changes);
+  const status: Operation["status"] = operations.some(op => op.status === "pending") ? "pending"
+    : operations.some(op => op.status === "running") ? "running"
+      : operations.some(op => op.status === "failed") ? "failed"
+        : operations.some(op => op.status === "interrupted") ? "interrupted"
+          : "completed";
+  return {
+    id,
+    taskId,
+    sessionId: operations.every(op => op.sessionId === operations[0].sessionId) ? operations[0].sessionId : undefined,
+    operationIds: operations.map(op => op.id),
+    operationCount: operations.length,
+    createdAt: operations[0].createdAt,
+    updatedAt: operations[operations.length - 1].createdAt,
+    status,
+    canUndo: !blocked && records.length > 0 && anyActive && !anyUndone,
+    canRedo: !blocked && records.length > 0 && anyUndone && !anyActive,
+    mixed: anyUndone && anyActive,
+    changes,
+    review,
+  };
+}
+
+function publicChangeSet(value: ReturnType<typeof buildChangeSetDetail>) {
+  return {
+    ...value,
+    changes: value.changes.map(change => ({ path: change.path, before: change.before.kind, after: change.after.kind })),
+    review: value.review ? {
+      ...value.review,
+      files: value.review.files.map(({ diff, ...file }) => file),
+    } : undefined,
+  };
+}
+
+export async function changeSetDetail(id: string) {
+  await init();
+  return structuredClone(buildChangeSetDetail(id));
+}
+
+export async function latestWorkspaceChangeSet(workspaceId: string) {
+  await init();
+  workspaceById(workspaceId);
+  const taskIds = new Set(state.tasks.filter(task => task.workspaceId === workspaceId).map(task => task.id));
+  const latest = [...state.operations].reverse().find(op =>
+    taskIds.has(op.taskId)
+    && op.tracking === "file-tools"
+    && ["completed", "failed"].includes(op.status)
+    && op.changes.length > 0
+  );
+  if (!latest) return null;
+  return structuredClone(publicChangeSet(buildChangeSetDetail(latest.changeSetId || latest.id)));
+}
+
 async function restore(target: string, value: Snapshot): Promise<void> {
   if (value.kind === "missing") {
     try { const s = await fs.lstat(target); if (s.isDirectory()) await fs.rmdir(target); else await fs.unlink(target); }
@@ -751,6 +943,68 @@ async function restore(target: string, value: Snapshot): Promise<void> {
     if (value.mode !== undefined) await fs.chmod(target, value.mode);
   }
 }
+
+export async function undoChangeSet(id: string, redo: boolean): Promise<ReturnType<typeof publicChangeSet>> {
+  await init();
+  const initial = changeSetMembers(id);
+  const taskId = initial[0]?.taskId;
+  if (!taskId) throw new Error("Change set cannot be restored");
+  return workspaceExclusive(taskId, async () => {
+    const detail = buildChangeSetDetail(id);
+    if (detail.taskId !== taskId) throw new Error("Change set task changed");
+    if (detail.mixed) throw new Error("CHANGE_SET_MIXED: this change set was partially restored; use Activity to finish Undo/Redo safely");
+    if (redo ? !detail.canRedo : !detail.canUndo) throw new Error(redo ? "Change set cannot be redone" : "Change set cannot be undone");
+    const operations = changeSetMembers(id).filter(op => op.tracking === "file-tools" && ["completed", "failed"].includes(op.status) && op.changes.length);
+    const contributions = new Map<string, Change[]>();
+    for (const op of operations) for (const change of op.changes) {
+      const list = contributions.get(change.path) || [];
+      list.push(change);
+      contributions.set(change.path, list);
+    }
+    const task = taskById(taskId);
+    const executionRoot = taskExecutionPath(task);
+    const aggregate = aggregateChangeSetChanges(operations);
+    const aggregatePaths = new Set(aggregate.map(change => change.path));
+    await executionContext.run({ taskId, sessionId: detail.sessionId, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: id, capture: async () => {} }, async () => {
+      // Validate the whole change set before touching disk. This keeps batch Undo/Redo atomic on conflicts.
+      for (const change of aggregate) {
+        await validatePath(change.path);
+        const current = await snapshot(change.path);
+        const expected = redo ? change.before : change.after;
+        if (fingerprint(current) !== fingerprint(expected)) throw new Error(`UNDO_CONFLICT: ${change.path} changed since this change set was recorded`);
+        const target = redo ? change.after : change.before;
+        if (target.kind === "missing" && current.kind === "directory") {
+          const nested = new Map<string, Snapshot>();
+          await captureTree(change.path, nested);
+          for (const nestedPath of nested.keys()) {
+            if (nestedPath !== change.path && !aggregatePaths.has(nestedPath)) throw new Error(`UNDO_CONFLICT: untracked content in ${change.path}`);
+          }
+        }
+      }
+      const ordered = [...aggregate].sort((a, b) => {
+        const av = redo ? a.after : a.before, bv = redo ? b.after : b.before;
+        if (av.kind === "missing" && bv.kind !== "missing") return 1;
+        if (av.kind !== "missing" && bv.kind === "missing") return -1;
+        return av.kind === "missing" ? b.path.length - a.path.length : a.path.length - b.path.length;
+      });
+      for (const change of ordered) {
+        await restore(change.path, redo ? change.after : change.before);
+        for (const record of contributions.get(change.path) || []) record.undone = !redo;
+        await save({ scopes: ["operations", "workspace"], taskId, operationId: operations.at(-1)?.id, reason: redo ? "change-set-redone" : "change-set-undone" });
+      }
+      // Net-zero paths do not require disk writes, but their journal state still follows the batch action.
+      for (const [pathValue, records] of contributions) {
+        if (aggregatePaths.has(pathValue)) continue;
+        for (const record of records) record.undone = !redo;
+      }
+      if ([...contributions.keys()].some(pathValue => !aggregatePaths.has(pathValue))) {
+        await save({ scopes: ["operations", "workspace"], taskId, operationId: operations.at(-1)?.id, reason: redo ? "change-set-redone" : "change-set-undone" });
+      }
+    });
+    return publicChangeSet(buildChangeSetDetail(id));
+  });
+}
+
 export async function undoOperation(id: string, redo: boolean, file?: string): Promise<void> {
   await init();
   const taskId = state.operations.find(o => o.id === id)?.taskId;
@@ -759,9 +1013,10 @@ export async function undoOperation(id: string, redo: boolean, file?: string): P
     const op = state.operations.find(o => o.id === id);
     if (!op || !["completed", "failed"].includes(op.status)) throw new Error("Operation cannot be restored");
     const task = taskById(op.taskId);
+    const executionRoot = taskExecutionPath(task);
     const changes = op.changes.filter(c => (!file || c.path === file) && !!c.undone === redo);
     if (!changes.length) throw new Error("No changes to restore");
-    await executionContext.run({ taskId: task.id, workspace: task.workspace, workspaceOnly: task.policy.workspaceOnly, operationId: id, capture: async () => {} }, async () => {
+    await executionContext.run({ taskId: task.id, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: id, capture: async () => {} }, async () => {
       // Validate every file first. A conflict in any file prevents all writes.
       for (const c of changes) {
         await validatePath(c.path);

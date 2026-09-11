@@ -4,9 +4,14 @@ export const state = {
   workspaceId: null,
   taskId: null,
   git: null,
+  gitOverview: null,
   gitError: null,
   changes: [],
   changeByPath: new Map(),
+  workspaceReview: null,
+  workspaceReviewId: null,
+  workspaceReviewExpanded: false,
+  connections: [],
   changeFilter: 'all',
   agentFilter: 'all',
   checkpoints: [],
@@ -14,6 +19,7 @@ export const state = {
   tabs: [],
   activeTabId: null,
   currentOperationId: null,
+  currentOperationTaskId: null,
   currentCheckpointId: null,
   currentAgentSessionId: null,
   connected: false,
@@ -27,17 +33,39 @@ export function currentTask() {
   return state.data?.tasks?.find(task => task.id === state.taskId) || null;
 }
 
+export function currentWorkspaceTasks() {
+  const workspace = currentWorkspace();
+  if (!workspace) return [];
+  const workspacePath = String(workspace.path || '').replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+  return (state.data?.tasks || []).filter(task => {
+    if (task.workspaceId === workspace.id) return true;
+    if (task.workspaceId || !workspacePath) return false;
+    const taskPath = String(task.workspace || '').replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+    return taskPath === workspacePath;
+  });
+}
+
+export function currentWorkspaceOperations() {
+  const taskIds = new Set(currentWorkspaceTasks().map(task => task.id));
+  return (state.data?.operations || []).filter(operation => taskIds.has(operation.taskId));
+}
+
 export function resetTaskView() {
   state.git = null;
+  state.gitOverview = null;
   state.gitError = null;
   state.changes = [];
   state.changeByPath = new Map();
+  state.workspaceReview = null;
+  state.workspaceReviewId = null;
+  state.workspaceReviewExpanded = false;
   state.agentFilter = 'all';
   state.checkpoints = [];
   state.currentTreePath = '.';
   state.tabs = [];
   state.activeTabId = null;
   state.currentOperationId = null;
+  state.currentOperationTaskId = null;
   state.currentCheckpointId = null;
   state.currentAgentSessionId = null;
 }

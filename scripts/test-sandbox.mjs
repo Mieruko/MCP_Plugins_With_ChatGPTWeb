@@ -65,6 +65,22 @@ try {
 
   const volumes = spec.args.flatMap((value, index) => value === '--volume' ? [spec.args[index + 1]] : []);
   assert.deepEqual(volumes, [`${path.resolve(workspace)}:/workspace:rw`]);
+  const extra = path.join(tmp, 'git-common');
+  await fs.mkdir(extra, { recursive: true });
+  const mountedSpec = buildDockerRunSpec(
+    workspace,
+    subdir,
+    'git',
+    ['status'],
+    { GIT_DIR: '/git-common/worktrees/demo' },
+    'clc-sandbox-mount-test',
+    [{ hostPath: extra, containerPath: '/git-common' }],
+  );
+  const mountedVolumes = mountedSpec.args.flatMap((value, index) => value === '--volume' ? [mountedSpec.args[index + 1]] : []);
+  assert.deepEqual(mountedVolumes, [
+    `${path.resolve(workspace)}:/workspace:rw`,
+    `${path.resolve(extra)}:/git-common:rw`,
+  ]);
   assert.ok(spec.args.includes('TEST_FLAG=yes'));
   assert.ok(spec.args.includes('HOME=/home/sandbox'));
   assert.ok(spec.args.includes('example/local-coder-sandbox:test'));

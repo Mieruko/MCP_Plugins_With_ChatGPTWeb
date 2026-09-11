@@ -27,7 +27,7 @@ export function parentPath(value) {
 export function taskRelative(value) {
   const task = currentTask();
   if (!task || !value) return String(value || '');
-  const root = task.workspace.replace(/\\/g, '/').replace(/\/$/, '');
+  const root = (task.execution?.path || task.workspace).replace(/\\/g, '/').replace(/\/$/, '');
   const normalized = String(value).replace(/\\/g, '/');
   return normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)
     ? normalized.slice(root.length + 1)

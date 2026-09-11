@@ -6,7 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
-import { resolveSessionTask, getWorkbench } from "./workbench.js";
+import { resolveSessionTask, getWorkbench, taskExecutionPath } from "./workbench.js";
 import { executionContext } from "./workbench-context.js";
 import { buildInstructionContext } from "./instruction-context.js";
 
@@ -258,17 +258,18 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     const sessionId = preferredSessionId || randomUUID();
     const taskId = await resolveSessionTask(sessionId, config.workspaceRoot);
     const task = (await getWorkbench()).tasks.find(t => t.id === taskId)!;
+    const executionRoot = taskExecutionPath(task);
     // Bind both initialization memory and tools to the same task. Never send the
     // server's startup project memory to a session selected for another project.
-    const context = await executionContext.run({ taskId, sessionId, workspace: task.workspace, workspaceOnly: true,
+    const context = await executionContext.run({ taskId, sessionId, workspace: executionRoot, workspaceOnly: true,
       operationId: "initialization", capture: async () => {} }, () => buildInstructionContext({
-        workspaceRoot: task.workspace, workspaceRoots: [task.workspace], pid: process.pid,
+        workspaceRoot: executionRoot, workspaceRoots: [executionRoot], pid: process.pid,
         adminPort: Number(process.env.ADMIN_PORT || 3001),
       }));
     const mcpServer = createMcpServer(
-      task.workspace,
+      executionRoot,
       config.shellTimeout,
-      [task.workspace],
+      [executionRoot],
       !task.policy.workspaceOnly,
       getUpstreamManager(),
       context.instructionsText,
@@ -286,7 +287,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
           transport,
           server: mcpServer,
           taskId,
-          workspace: task.workspace,
+          workspace: executionRoot,
           clientInfo: pending?.clientInfo ?? existing?.clientInfo ?? clientInfo,
           lastAccessedAt: Date.now(),
           createdAt: existing?.createdAt ?? Date.now(),
@@ -326,7 +327,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         transport,
         server: mcpServer,
         taskId,
-        workspace: task.workspace,
+        workspace: executionRoot,
         clientInfo,
         lastAccessedAt: Date.now(),
         createdAt: Date.now(),

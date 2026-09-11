@@ -106,7 +106,7 @@ async function openAgentDetail(session, task, branch) {
   $('agent-dialog').showModal();
   $('agent-activity-list').replaceChildren(el('p', 'Loading activity…', 'empty-copy'));
   try {
-    const activity = await api(`/api/activity?limit=80&kind=tool&q=${encodeURIComponent(session.id)}`);
+    const activity = await api(`/api/activity?limit=80&kind=tool&task=${encodeURIComponent(session.taskId)}&q=${encodeURIComponent(session.id)}`);
     if (state.currentAgentSessionId === session.id) renderAgentActivity(activity.entries || []);
   } catch (error) {
     if (state.currentAgentSessionId === session.id) $('agent-activity-list').replaceChildren(el('p', `Activity unavailable: ${error.message}`, 'empty-copy'));

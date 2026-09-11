@@ -23,6 +23,12 @@ export interface DockerRunSpec {
   containerCwd: string;
 }
 
+export interface SandboxMount {
+  hostPath: string;
+  containerPath: string;
+  readOnly?: boolean;
+}
+
 export interface SandboxedProcess {
   child: ChildProcessWithoutNullStreams;
   provider: "docker";
@@ -86,7 +92,8 @@ export function buildDockerRunSpec(
   program: string,
   programArgs: string[],
   env: Record<string, string> = {},
-  name = `clc-${randomUUID().slice(0, 12)}`
+  name = `clc-${randomUUID().slice(0, 12)}`,
+  extraMounts: SandboxMount[] = [],
 ): DockerRunSpec {
   const image = sandboxImage();
   const memoryMb = positiveInt("WORKBENCH_SANDBOX_MEMORY_MB", 1536, 128, 32768);
@@ -94,6 +101,12 @@ export function buildDockerRunSpec(
   const cpus = Math.max(0.25, Math.min(16, Number(process.env.WORKBENCH_SANDBOX_CPUS) || 2));
   const containerCwd = containerPath(workspace, cwd);
   const volume = `${path.resolve(workspace)}:/workspace:rw`;
+  const mountArgs = extraMounts.flatMap(mount => {
+    if (!mount.containerPath.startsWith("/") || mount.containerPath.includes("..")) {
+      throw new Error("SANDBOX_CONFIG_INVALID: extra mount container path must be absolute and normalized");
+    }
+    return ["--volume", `${path.resolve(mount.hostPath)}:${mount.containerPath}:${mount.readOnly ? "ro" : "rw"}`];
+  });
   const envArgs = Object.entries({ HOME: "/home/sandbox", CI: "1", NO_COLOR: "1", ...env })
     .flatMap(([key, value]) => ["--env", `${key}=${value}`]);
   const args = [
@@ -109,6 +122,7 @@ export function buildDockerRunSpec(
     "--tmpfs", "/home/sandbox:rw,nosuid,nodev,size=64m",
     "--user", containerUser(),
     "--volume", volume,
+    ...mountArgs,
     "--workdir", containerCwd,
     ...envArgs,
     image,
@@ -197,12 +211,13 @@ export async function spawnSandboxedProgram(
   program: string,
   args: string[],
   cwd: string,
-  env: Record<string, string> = {}
+  env: Record<string, string> = {},
+  extraMounts: SandboxMount[] = [],
 ): Promise<SandboxedProcess> {
   const context = executionContext.getStore();
   if (!context?.workspaceOnly) throw new Error("Sandboxed execution requires a workspace-only task context");
   await requireWorkspaceSandbox();
-  const spec = buildDockerRunSpec(context.workspace, cwd, program, args, env);
+  const spec = buildDockerRunSpec(context.workspace, cwd, program, args, env, undefined, extraMounts);
   const child = spawn(spec.bin, spec.args, { windowsHide: true, env: sandboxDockerEnvironment() }) as ChildProcessWithoutNullStreams;
   return { child, provider: "docker", containerName: spec.containerName };
 }

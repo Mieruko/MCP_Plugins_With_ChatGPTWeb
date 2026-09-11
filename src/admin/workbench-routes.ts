@@ -3,7 +3,7 @@ import path from "node:path";
 import { Router } from "express";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createTask, createTaskCheckpoint, createWorkspace, decideOperation, dispatch, getWorkbench, listTaskCheckpoints, operationDetail, previewTaskCheckpoint, restoreTaskCheckpoint, selectTask, selectWorkspace, setTaskPolicy, setTaskPreview, subscribeWorkbench, undoOperation } from "../lib/workbench.js";
+import { changeSetDetail, createTask, createTaskCheckpoint, createWorkspace, decideOperation, dispatch, getWorkbench, latestWorkspaceChangeSet, listTaskCheckpoints, operationDetail, previewTaskCheckpoint, restoreTaskCheckpoint, selectTask, selectWorkspace, setTaskPolicy, setTaskPreview, subscribeWorkbench, taskExecutionPath, undoChangeSet, undoOperation } from "../lib/workbench.js";
 import { getMachineRoots } from "../lib/path-security.js";
 import { registerFilesystemTools } from "../tools/filesystem.js";
 import { registerShellTools } from "../tools/shell.js";
@@ -26,6 +26,17 @@ export function createWorkbenchRouter(): Router {
     if (!found) throw new Error("Unknown task");
     return found;
   };
+  const executionRoot = (value: Awaited<ReturnType<typeof task>>) => taskExecutionPath(value);
+  const parseWorktrees = (raw: string) => raw.split(/\r?\n\r?\n/).map(block => {
+    const item: { path?: string; head?: string; branch?: string; detached?: boolean } = {};
+    for (const line of block.split(/\r?\n/).filter(Boolean)) {
+      if (line.startsWith("worktree ")) item.path = line.slice(9);
+      else if (line.startsWith("HEAD ")) item.head = line.slice(5);
+      else if (line.startsWith("branch ")) item.branch = line.slice(7).replace(/^refs\/heads\//, "");
+      else if (line === "detached") item.detached = true;
+    }
+    return item.path ? item : null;
+  }).filter(Boolean);
   const invoke = async (taskId: string, tool: string, rawArgs: Record<string, unknown>, definitions: Map<string, Definition>, human = true) => {
     const found = await task(taskId);
     const def = definitions.get(tool);
@@ -88,8 +99,12 @@ export function createWorkbenchRouter(): Router {
       title: z.string().min(1).max(200),
       workspace: z.string().min(1).optional(),
       workspaceId: z.string().min(1).optional(),
+      environment: z.object({
+        mode: z.enum(["local", "worktree"]).default("local"),
+        startingRef: z.string().min(1).max(200).optional(),
+      }).strict().optional(),
     }).strict().refine(value => Boolean(value.workspace || value.workspaceId), { message: "workspace or workspaceId required" }).parse(req.body);
-    return createTask(body.title, body.workspace, body.workspaceId);
+    return createTask(body.title, body.workspace, body.workspaceId, body.environment);
   }));
   router.post("/api/workbench/tasks/:id/select", route(req => selectTask(req.params.id)));
   router.put("/api/workbench/tasks/:id/policy", route(req => {
@@ -111,6 +126,12 @@ export function createWorkbenchRouter(): Router {
   router.post("/api/workbench/operations/:id/undo", route(req => {
     const body = z.object({ redo: z.boolean().default(false), file: z.string().optional() }).strict().parse(req.body);
     return undoOperation(req.params.id, body.redo, body.file);
+  }));
+  router.get("/api/workbench/workspaces/:id/latest-change-set", route(async req => ({ changeSet: await latestWorkspaceChangeSet(req.params.id) })));
+  router.get("/api/workbench/change-sets/:id", route(req => changeSetDetail(req.params.id)));
+  router.post("/api/workbench/change-sets/:id/undo", route(req => {
+    const body = z.object({ redo: z.boolean().default(false) }).strict().parse(req.body || {});
+    return undoChangeSet(req.params.id, body.redo);
   }));
   router.get("/api/workbench/tasks/:id/tree", route(async req => {
     const dir = typeof req.query.path === "string" && req.query.path ? req.query.path : ".";
@@ -153,21 +174,21 @@ export function createWorkbenchRouter(): Router {
   }));
   router.get("/api/workbench/tasks/:id/context", route(async req => {
     const found = await task(req.params.id);
-    return invoke(found.id, "project_context", { path: ".", max_depth: 3, max_bytes_per_file: 60000 }, contextDefinitions(found.workspace));
+    return invoke(found.id, "project_context", { path: ".", max_depth: 3, max_bytes_per_file: 60000 }, contextDefinitions(executionRoot(found)));
   }));
   router.post("/api/workbench/tasks/:id/shell", route(async req => {
     const found = await task(req.params.id);
     const body = z.object({ command: z.string().min(1), working_directory: z.string().optional() }).strict().parse(req.body);
-    return invoke(found.id, "run_command", body, shellDefinitions(found.workspace), true);
+    return invoke(found.id, "run_command", body, shellDefinitions(executionRoot(found)), true);
   }));
   router.get("/api/workbench/tasks/:id/processes", route(async req => {
     const found = await task(req.params.id);
-    return invoke(found.id, "process_status", {}, shellDefinitions(found.workspace));
+    return invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
   }));
   router.post("/api/workbench/tasks/:id/processes", route(async req => {
     const found = await task(req.params.id);
     const body = z.object({ command: z.string().min(1), working_directory: z.string().optional(), yield_time_ms: z.number().int().min(0).max(10000).default(500) }).strict().parse(req.body);
-    return invoke(found.id, "start_process", body, shellDefinitions(found.workspace), true);
+    return invoke(found.id, "start_process", body, shellDefinitions(executionRoot(found)), true);
   }));
   router.get("/api/workbench/tasks/:id/processes/:processId/output", route(async req => {
     const found = await task(req.params.id);
@@ -181,17 +202,17 @@ export function createWorkbenchRouter(): Router {
       tail_chars,
       ...(stdoutCursor === undefined ? {} : { cursor: { stdout: stdoutCursor, stderr: stderrCursor! } }),
       wait_ms,
-    }, shellDefinitions(found.workspace));
+    }, shellDefinitions(executionRoot(found)));
   }));
   router.post("/api/workbench/tasks/:id/processes/:processId/stop", route(async req => {
     const found = await task(req.params.id);
     const force = z.object({ force: z.boolean().default(false) }).strict().parse(req.body || {}).force;
-    return invoke(found.id, "stop_process", { id: req.params.processId, force }, shellDefinitions(found.workspace), true);
+    return invoke(found.id, "stop_process", { id: req.params.processId, force }, shellDefinitions(executionRoot(found)), true);
   }));
   router.get("/api/workbench/tasks/:id/preview", route(async req => {
     const found = await task(req.params.id);
     if (!found.preview) return { configured: false, running: false };
-    const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(found.workspace));
+    const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
     const process = (status.processes || []).find((item: any) => item.id === found.preview?.processId);
     const running = Boolean(process?.running);
     const probe = running ? await probePreviewUrl(found.preview.url) : { reachable: false, status: null, error: null };
@@ -213,7 +234,7 @@ export function createWorkbenchRouter(): Router {
     const body = z.object({ command: z.string().min(1).max(4000), url: z.string().min(1).max(2048) }).strict().parse(req.body);
     const found = await task(req.params.id);
     if (found.preview?.processId) {
-      const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(found.workspace));
+      const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
       if ((status.processes || []).some((item: any) => item.id === found.preview?.processId && item.running)) {
         throw new Error("Stop the running preview before changing its configuration.");
       }
@@ -228,12 +249,12 @@ export function createWorkbenchRouter(): Router {
     }
     const url = normalizePreviewUrl(body.url);
     if (found.preview?.processId) {
-      const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(found.workspace));
+      const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
       if ((status.processes || []).some((item: any) => item.id === found.preview?.processId && item.running)) {
         throw new Error("Preview is already running. Stop it before starting a new preview.");
       }
     }
-    const started: any = await invoke(found.id, "start_process", { command: body.command, yield_time_ms: 500 }, shellDefinitions(found.workspace), true);
+    const started: any = await invoke(found.id, "start_process", { command: body.command, yield_time_ms: 500 }, shellDefinitions(executionRoot(found)), true);
     await setTaskPreview(found.id, { command: body.command, url, processId: started.id, startedAt: new Date().toISOString() });
     return { ...started, url };
   }));
@@ -241,9 +262,9 @@ export function createWorkbenchRouter(): Router {
     const found = await task(req.params.id);
     if (!found.preview) return { stopped: false, reason: "not configured" };
     if (found.preview.processId) {
-      const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(found.workspace));
+      const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
       if ((status.processes || []).some((item: any) => item.id === found.preview?.processId && item.running)) {
-        await invoke(found.id, "stop_process", { id: found.preview.processId, force: false }, shellDefinitions(found.workspace), true);
+        await invoke(found.id, "stop_process", { id: found.preview.processId, force: false }, shellDefinitions(executionRoot(found)), true);
       }
     }
     await setTaskPreview(found.id, { command: found.preview.command, url: found.preview.url });
@@ -251,29 +272,38 @@ export function createWorkbenchRouter(): Router {
   }));
   router.get("/api/workbench/tasks/:id/git/status", route(async req => {
     const found = await task(req.params.id);
-    return invoke(found.id, "git_status", {}, gitDefinitions(found.workspace));
+    return invoke(found.id, "git_status", {}, gitDefinitions(executionRoot(found)));
   }));
   router.get("/api/workbench/tasks/:id/git/overview", route(async req => {
     const found = await task(req.params.id);
-    const definitions = gitDefinitions(found.workspace);
-    const [status, log, branches] = await Promise.all([
+    const definitions = gitDefinitions(executionRoot(found));
+    const [status, log, branches, worktrees] = await Promise.all([
       invoke(found.id, "git_status", {}, definitions),
-      invoke(found.id, "git_log", { count: 8 }, definitions),
+      invoke(found.id, "git_log", { count: 8 }, definitions).catch(() => ({ commits: [] })),
       invoke(found.id, "git_branch", { action: "list" }, definitions),
+      invoke(found.id, "git_worktree", { action: "list" }, definitions),
     ]);
     const branchOutput = String((branches as any)?.output || "");
-    const branchList = branchOutput.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => ({
+    const branchList = branchOutput.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.includes(" -> ")).map(line => ({
       current: line.startsWith("*"),
       name: line.replace(/^\*\s*/, "").replace(/^remotes\//, ""),
       remote: line.replace(/^\*\s*/, "").startsWith("remotes/"),
     }));
-    return { status, commits: (log as any)?.commits || [], branches: branchList };
+    const worktreeOutput = String((worktrees as any)?.stdout || (worktrees as any)?.output || "");
+    return {
+      status,
+      commits: (log as any)?.commits || [],
+      branches: branchList,
+      worktrees: parseWorktrees(worktreeOutput),
+      execution: found.execution,
+      projectWorkspace: found.workspace,
+    };
   }));
   router.post("/api/workbench/tasks/:id/git", route(async req => {
     const body = z.object({ tool: z.string().startsWith("git_"), args: z.record(z.any()).default({}) }).strict().parse(req.body);
     const task = (await getWorkbench()).tasks.find(t => t.id === req.params.id);
     if (!task) throw new Error("Unknown task");
-    const definitions = gitDefinitions(task.workspace);
+    const definitions = gitDefinitions(taskExecutionPath(task));
     const def = definitions.get(body.tool);
     if (!def) throw new Error("Unknown Git action");
     const args = z.object(def.config.inputSchema).strict().parse(body.args);
@@ -283,7 +313,7 @@ export function createWorkbenchRouter(): Router {
     const input = githubSchema.parse(req.body);
     const task = (await getWorkbench()).tasks.find(t => t.id === req.params.id);
     if (!task) throw new Error("Unknown task");
-    return dispatch(task.id, "github", input, () => executeGithub(input, task.workspace), true);
+    return dispatch(task.id, "github", input, () => executeGithub(input, taskExecutionPath(task)), true);
   }));
   router.get("/api/workbench/events", (_req, res) => {
     res.setHeader("Content-Type", "text/event-stream");

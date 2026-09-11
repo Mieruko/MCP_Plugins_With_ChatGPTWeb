@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { dispatch, getWorkbench, operationDetail, resolveDefaultTask } from "./workbench.js";
+import { dispatch, getWorkbench, operationDetail, resolveDefaultTask, taskExecutionPath } from "./workbench.js";
 import { executionContext } from "./workbench-context.js";
 import { validatePath } from "./path-security.js";
 
@@ -25,7 +25,7 @@ export function installWorkbench(server: McpServer, workspace: string, pinnedTas
       if (op.taskId !== taskId) throw new Error("Operation belongs to another task");
       const current = (await getWorkbench()).tasks.find(t => t.id === taskId)!;
       if (current.policy.workspaceOnly && op.tracking !== "file-tools") throw new Error("Operation output unavailable under current workspace-only policy");
-      await executionContext.run({ taskId, sessionId: pinnedSessionId, workspace: current.workspace, workspaceOnly: current.policy.workspaceOnly, operationId: op.id, capture: async () => {} }, async () => {
+      await executionContext.run({ taskId, sessionId: pinnedSessionId, workspace: taskExecutionPath(current), workspaceOnly: current.policy.workspaceOnly, operationId: op.id, capture: async () => {} }, async () => {
         for (const change of op.changes) await validatePath(change.path);
       });
       return { content: [{ type: "text", text: JSON.stringify({ id: op.id, status: op.status, error: op.error, result: op.result }) }] };

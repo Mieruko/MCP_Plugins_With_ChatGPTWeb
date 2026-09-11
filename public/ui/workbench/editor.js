@@ -4,10 +4,15 @@ import { $, basename, el, renderCode, renderUnifiedDiff, setStatus } from './dom
 import { languageForPath, loadMonaco, reconstructUnifiedDiff } from './monaco.js';
 
 let codeEditor;
-let diffEditor;
+const diffEditors = { original: null, modified: null };
+const diffScrollListeners = { original: null, modified: null };
+let diffScrollSyncEnabled = true;
+let diffScrollSyncGuard = false;
+let lastDiffScrollSide = 'original';
 let resizeObserver;
 const monacoModels = new Map();
 const modelListeners = new Map();
+const diffLineDecorations = { original: [], modified: [] };
 
 function currentTab() {
   return state.tabs.find(item => item.id === state.activeTabId);
@@ -112,7 +117,10 @@ function ensureResizeObserver() {
   if (resizeObserver || typeof ResizeObserver === 'undefined') return;
   resizeObserver = new ResizeObserver(() => {
     if (!$('code-view').hidden) codeEditor?.layout();
-    if (!$('diff-view').hidden) diffEditor?.layout();
+    if (!$('diff-view').hidden) {
+      diffEditors.original?.layout();
+      diffEditors.modified?.layout();
+    }
   });
   resizeObserver.observe($('code-view'));
   resizeObserver.observe($('diff-view'));
@@ -144,7 +152,7 @@ function fileModel(monaco, tab) {
 function diffModels(monaco, tab) {
   let models = monacoModels.get(tab.id);
   if (models) return models;
-  const pair = reconstructUnifiedDiff(tab.content || '');
+  const pair = alignDiffPair(reconstructUnifiedDiff(tab.content || ''));
   if (!pair.parsed) return null;
   const language = languageForPath(tab.path);
   models = {
@@ -152,14 +160,186 @@ function diffModels(monaco, tab) {
     modified: monaco.editor.createModel(pair.modified, language, modelUri(monaco, tab, '-modified')),
     originalLineNumbers: pair.originalLineNumbers,
     modifiedLineNumbers: pair.modifiedLineNumbers,
+    originalKinds: pair.originalKinds,
+    modifiedKinds: pair.modifiedKinds,
+    originalIntraline: pair.originalIntraline,
+    modifiedIntraline: pair.modifiedIntraline,
   };
   monacoModels.set(tab.id, models);
   return models;
 }
 
+function alignDiffPair(pair) {
+  if (!pair?.parsed) return pair;
+  const originalLines = pair.originalKinds.length ? pair.original.split('\n') : [];
+  const modifiedLines = pair.modifiedKinds.length ? pair.modified.split('\n') : [];
+  const aligned = {
+    original: [],
+    modified: [],
+    originalLineNumbers: [],
+    modifiedLineNumbers: [],
+    originalKinds: [],
+    modifiedKinds: [],
+    parsed: true,
+  };
+  const pushOriginal = (index, fallbackKind = 'gap') => {
+    if (index == null) {
+      aligned.original.push('');
+      aligned.originalLineNumbers.push(null);
+      aligned.originalKinds.push(fallbackKind);
+      return;
+    }
+    aligned.original.push(originalLines[index] ?? '');
+    aligned.originalLineNumbers.push(pair.originalLineNumbers[index] ?? null);
+    aligned.originalKinds.push(pair.originalKinds[index] || fallbackKind);
+  };
+  const pushModified = (index, fallbackKind = 'gap') => {
+    if (index == null) {
+      aligned.modified.push('');
+      aligned.modifiedLineNumbers.push(null);
+      aligned.modifiedKinds.push(fallbackKind);
+      return;
+    }
+    aligned.modified.push(modifiedLines[index] ?? '');
+    aligned.modifiedLineNumbers.push(pair.modifiedLineNumbers[index] ?? null);
+    aligned.modifiedKinds.push(pair.modifiedKinds[index] || fallbackKind);
+  };
+
+  let originalIndex = 0;
+  let modifiedIndex = 0;
+  while (originalIndex < pair.originalKinds.length || modifiedIndex < pair.modifiedKinds.length) {
+    const originalKind = pair.originalKinds[originalIndex];
+    const modifiedKind = pair.modifiedKinds[modifiedIndex];
+    if (originalKind === 'remove' || modifiedKind === 'add') {
+      const removals = [];
+      const additions = [];
+      while (pair.originalKinds[originalIndex] === 'remove') removals.push(originalIndex++);
+      while (pair.modifiedKinds[modifiedIndex] === 'add') additions.push(modifiedIndex++);
+      const rows = Math.max(removals.length, additions.length);
+      for (let row = 0; row < rows; row += 1) {
+        pushOriginal(removals[row] ?? null);
+        pushModified(additions[row] ?? null);
+      }
+      continue;
+    }
+    pushOriginal(originalIndex < pair.originalKinds.length ? originalIndex++ : null);
+    pushModified(modifiedIndex < pair.modifiedKinds.length ? modifiedIndex++ : null);
+  }
+
+  return {
+    ...pair,
+    original: aligned.original.join('\n'),
+    modified: aligned.modified.join('\n'),
+    originalLineNumbers: aligned.originalLineNumbers,
+    modifiedLineNumbers: aligned.modifiedLineNumbers,
+    originalKinds: aligned.originalKinds,
+    modifiedKinds: aligned.modifiedKinds,
+  };
+}
+
+function decorateDiffLineNumbers(monaco, editor, kinds, side) {
+  const decorations = (kinds || []).flatMap((kind, index) => {
+    if (kind !== 'add' && kind !== 'remove') return [];
+    const line = index + 1;
+    const lineNumberClassName = kind === 'add' ? 'workbench-diff-line-number-add' : 'workbench-diff-line-number-remove';
+    const changeBarClassName = kind === 'add' ? 'workbench-diff-change-bar-add' : 'workbench-diff-change-bar-remove';
+    const lineClassName = kind === 'add' ? 'workbench-diff-line-add' : 'workbench-diff-line-remove';
+    const marginClassName = kind === 'add' ? 'workbench-diff-margin-add' : 'workbench-diff-margin-remove';
+    return [{
+      range: new monaco.Range(line, 1, line, 1),
+      options: {
+        isWholeLine: true,
+        className: lineClassName,
+        marginClassName,
+        lineNumberClassName,
+        linesDecorationsClassName: changeBarClassName,
+      },
+    }];
+  });
+  diffLineDecorations[side] = editor.deltaDecorations(diffLineDecorations[side], decorations);
+}
+
+function clearDiffLineDecorations() {
+  if (diffEditors.original) diffLineDecorations.original = diffEditors.original.deltaDecorations(diffLineDecorations.original, []);
+  if (diffEditors.modified) diffLineDecorations.modified = diffEditors.modified.deltaDecorations(diffLineDecorations.modified, []);
+}
+
+function updateDiffSyncControl(visible = false) {
+  const button = $('diff-sync-scroll');
+  if (!button) return;
+  button.hidden = !visible;
+  button.classList.toggle('active', diffScrollSyncEnabled);
+  button.setAttribute('aria-pressed', String(diffScrollSyncEnabled));
+  button.textContent = diffScrollSyncEnabled ? '⇅ Sync scroll' : '⇅ Independent';
+  button.title = diffScrollSyncEnabled
+    ? 'Vertical scrolling is synchronized. Click for independent panes.'
+    : 'Diff panes scroll independently. Click to synchronize them.';
+}
+
+function syncDiffScroll(sourceSide, event) {
+  if (!event?.scrollTopChanged) return;
+  lastDiffScrollSide = sourceSide;
+  if (!diffScrollSyncEnabled || diffScrollSyncGuard) return;
+  const source = diffEditors[sourceSide];
+  const target = diffEditors[sourceSide === 'original' ? 'modified' : 'original'];
+  if (!source || !target) return;
+  const nextTop = source.getScrollTop();
+  if (Math.abs(target.getScrollTop() - nextTop) < 1) return;
+  diffScrollSyncGuard = true;
+  try { target.setScrollTop(nextTop); }
+  finally { diffScrollSyncGuard = false; }
+}
+
+function toggleDiffScrollSync() {
+  diffScrollSyncEnabled = !diffScrollSyncEnabled;
+  if (diffScrollSyncEnabled) {
+    const source = diffEditors[lastDiffScrollSide] || diffEditors.original;
+    const target = diffEditors[lastDiffScrollSide === 'original' ? 'modified' : 'original'];
+    if (source && target) {
+      diffScrollSyncGuard = true;
+      try { target.setScrollTop(source.getScrollTop()); }
+      finally { diffScrollSyncGuard = false; }
+    }
+  }
+  updateDiffSyncControl(Boolean(currentTab()?.type === 'diff'));
+}
+
+function disposeIndependentDiffEditors() {
+  for (const side of ['original', 'modified']) {
+    diffScrollListeners[side]?.dispose?.();
+    diffScrollListeners[side] = null;
+    diffLineDecorations[side] = [];
+    diffEditors[side]?.dispose?.();
+    diffEditors[side] = null;
+  }
+}
+
+function ensureIndependentDiffEditors(monaco, host) {
+  if (diffEditors.original && diffEditors.modified) return diffEditors;
+  host.replaceChildren();
+  host.classList.add('monaco-host', 'independent-diff-host');
+  const originalHost = el('div', undefined, 'independent-diff-pane original');
+  const modifiedHost = el('div', undefined, 'independent-diff-pane modified');
+  host.append(originalHost, modifiedHost);
+  diffEditors.original = monaco.editor.create(originalHost, {
+    ...editorOptions(true),
+    ariaLabel: 'Original file',
+    scrollbar: { vertical: 'visible', horizontal: 'visible' },
+  });
+  diffEditors.modified = monaco.editor.create(modifiedHost, {
+    ...editorOptions(true),
+    ariaLabel: 'Modified file',
+    scrollbar: { vertical: 'visible', horizontal: 'visible' },
+  });
+  diffScrollListeners.original = diffEditors.original.onDidScrollChange(event => syncDiffScroll('original', event));
+  diffScrollListeners.modified = diffEditors.modified.onDidScrollChange(event => syncDiffScroll('modified', event));
+  return diffEditors;
+}
+
 function renderLegacy(tab, code, diff) {
   code.classList.remove('monaco-host');
-  diff.classList.remove('monaco-host');
+  if (tab.type === 'diff') disposeIndependentDiffEditors();
+  diff.classList.remove('monaco-host', 'independent-diff-host');
   if (tab.type === 'diff') renderUnifiedDiff(diff, tab.content || 'No changes');
   else renderCode(code, tab.content || '');
 }
@@ -169,6 +349,7 @@ async function renderActiveTab() {
   const empty = $('editor-empty'), code = $('code-view'), diff = $('diff-view');
   if (!tab) {
     empty.hidden = false; code.hidden = true; diff.hidden = true;
+    updateDiffSyncControl(false);
     $('editor-breadcrumb').textContent = 'Workspace'; $('editor-kind').textContent = 'FILE'; $('editor-meta').textContent = '—';
     updateSaveState();
     return;
@@ -190,6 +371,7 @@ async function renderActiveTab() {
   if (state.activeTabId !== renderId) return;
   ensureResizeObserver();
   if (tab.type === 'diff') {
+    updateDiffSyncControl(true);
     code.hidden = true; diff.hidden = false;
     const models = diffModels(monaco, tab);
     if (!models) {
@@ -198,31 +380,26 @@ async function renderActiveTab() {
       $('editor-meta').textContent = tab.meta || 'Unified diff';
       return;
     }
-    diff.classList.add('monaco-host');
-    if (!diffEditor) {
-      diff.replaceChildren();
-      diffEditor = monaco.editor.createDiffEditor(diff, {
-        ...editorOptions(),
-        originalEditable: false,
-        renderSideBySide: true,
-        useInlineViewWhenSpaceIsLimited: true,
-        enableSplitViewResizing: true,
-        renderOverviewRuler: true,
-      });
-    }
-    diffEditor.setModel({ original: models.original, modified: models.modified });
-    diffEditor.getOriginalEditor().updateOptions({
+    const panes = ensureIndependentDiffEditors(monaco, diff);
+    clearDiffLineDecorations();
+    panes.original.setModel(models.original);
+    panes.modified.setModel(models.modified);
+    panes.original.updateOptions({
       lineNumbers: line => models.originalLineNumbers?.[line - 1] == null ? '' : String(models.originalLineNumbers[line - 1]),
       lineNumbersMinChars: 4,
     });
-    diffEditor.getModifiedEditor().updateOptions({
+    panes.modified.updateOptions({
       lineNumbers: line => models.modifiedLineNumbers?.[line - 1] == null ? '' : String(models.modifiedLineNumbers[line - 1]),
       lineNumbersMinChars: 4,
     });
-    diffEditor.layout();
+    decorateDiffLineNumbers(monaco, panes.original, models.originalKinds, 'original');
+    decorateDiffLineNumbers(monaco, panes.modified, models.modifiedKinds, 'modified');
+    panes.original.layout();
+    panes.modified.layout();
     $('editor-kind').textContent = tab.staged ? 'STAGED DIFF · MONACO' : 'DIFF · MONACO';
-    $('editor-meta').textContent = `${tab.meta || 'Git'} · changed hunks`;
+    $('editor-meta').textContent = `${tab.meta || 'Git'} · dual viewport`;
   } else {
+    updateDiffSyncControl(false);
     diff.hidden = true; code.hidden = false;
     code.classList.add('monaco-host');
     if (!codeEditor) {
@@ -239,6 +416,9 @@ async function renderActiveTab() {
   }
   updateSaveState();
 }
+
+const diffSyncScrollButton = $('diff-sync-scroll');
+if (diffSyncScrollButton) diffSyncScrollButton.onclick = toggleDiffScrollSync;
 
 export async function openFile(path, options = {}) {
   const id = tabId('file', path);
@@ -267,6 +447,41 @@ export async function openGitDiff(path, staged = false, options = {}) {
 
 export function openTextDiff({ id, path, title, content, meta }) {
   upsertTab({ id: id || tabId('diff', path), type: 'diff', path, title: title || basename(path), staged: false, content, meta });
+}
+
+function normalizedEditorPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '').toLowerCase();
+}
+
+function absoluteEditorPath(value, taskId = state.taskId) {
+  const normalized = normalizedEditorPath(value);
+  if (!normalized) return '';
+  if (/^[a-z]:\//i.test(normalized) || normalized.startsWith('/')) return normalized;
+  const task = (state.data?.tasks || []).find(item => item.id === taskId);
+  const root = normalizedEditorPath(task?.execution?.path || task?.workspace || '');
+  return root ? `${root}/${normalized}` : normalized;
+}
+
+export function invalidateRestoredEditorTabs({ taskId, changeSetId, paths = [] } = {}) {
+  if (taskId && state.taskId && taskId !== state.taskId) return false;
+  const affected = new Set(paths.map(path => absoluteEditorPath(path, taskId)).filter(Boolean));
+  let changed = false;
+  let activeRemoved = false;
+  state.tabs = state.tabs.filter(tab => {
+    const fromChangeSet = Boolean(changeSetId && tab.id.startsWith(`change-set-diff:${changeSetId}:`));
+    const samePath = affected.has(absoluteEditorPath(tab.path, taskId));
+    if (!fromChangeSet && !samePath) return true;
+    if (tab.type === 'file' && (tab.dirty || tab.pendingOperationId)) return true;
+    disposeTabModels(tab.id);
+    if (tab.id === state.activeTabId) activeRemoved = true;
+    changed = true;
+    return false;
+  });
+  if (!changed) return false;
+  if (activeRemoved) state.activeTabId = state.tabs.at(-1)?.id || null;
+  renderTabs();
+  void renderActiveTab();
+  return true;
 }
 
 export function resetEditor() {

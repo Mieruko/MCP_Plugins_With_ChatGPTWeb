@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { validatePath, getDefaultCwd } from "../lib/path-security.js";
@@ -19,6 +21,36 @@ interface GitStatusEntry {
   path: string;
   status: string;
   original_path?: string;
+}
+
+interface LinkedWorktreeSandbox {
+  env: Record<string, string>;
+  mounts: Array<{ hostPath: string; containerPath: string }>;
+}
+
+async function linkedWorktreeSandbox(cwd: string): Promise<LinkedWorktreeSandbox | undefined> {
+  const dotGit = path.join(cwd, ".git");
+  let stat;
+  try { stat = await fs.stat(dotGit); } catch { return undefined; }
+  if (!stat.isFile()) return undefined;
+  const marker = (await fs.readFile(dotGit, "utf8")).trim();
+  const match = marker.match(/^gitdir:\s*(.+)$/i);
+  if (!match) return undefined;
+  const gitDir = path.resolve(cwd, match[1]);
+  const commonMarker = (await fs.readFile(path.join(gitDir, "commondir"), "utf8")).trim();
+  const commonDir = path.resolve(gitDir, commonMarker);
+  const relativeGitDir = path.relative(commonDir, gitDir).split(path.sep).join("/");
+  if (!relativeGitDir || relativeGitDir.startsWith("../") || path.isAbsolute(relativeGitDir)) {
+    throw new Error("Invalid linked worktree Git metadata layout");
+  }
+  return {
+    env: {
+      GIT_DIR: `/git-common/${relativeGitDir}`,
+      GIT_COMMON_DIR: "/git-common",
+      GIT_WORK_TREE: "/workspace",
+    },
+    mounts: [{ hostPath: commonDir, containerPath: "/git-common" }],
+  };
 }
 
 function parsePorcelainV2(raw: string) {
@@ -58,11 +90,13 @@ function parsePorcelainV2(raw: string) {
 
 async function runGit(args: string[], cwd: string): Promise<GitRunResult> {
   const sandboxed = executionNeedsSandbox();
+  const linked = sandboxed ? await linkedWorktreeSandbox(cwd) : undefined;
   const launched = sandboxed ? await spawnSandboxedProgram(
     "git",
     ["--no-pager", "-c", "core.fsmonitor=false", "-c", "safe.directory=*", ...args],
     cwd,
-    { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "false", GIT_SEQUENCE_EDITOR: "false" }
+    { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "false", GIT_SEQUENCE_EDITOR: "false", ...(linked?.env || {}) },
+    linked?.mounts || [],
   ) : undefined;
   if (!sandboxed) requireUnrestrictedExecution();
   return new Promise((resolve, reject) => {
@@ -111,6 +145,19 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
     const status = parsePorcelainV2(porcelain.stdout);
     await audit({ tool: "git_status", action: "git", target: cwd, status: "ok" });
     return toolResult("git_status", { path: cwd, output: r.stdout || "Clean working tree", ...status });
+  });
+
+  server.registerTool("git_init", {
+    title: "Initialize Git Repository",
+    description: "Initialize a Git repository in the current task environment.",
+    inputSchema: { path: z.string().optional() },
+    annotations: toolAnnotations("edit"),
+  }, async ({ path: repoPath }) => {
+    requireWriteAllowed();
+    const cwd = await repo(repoPath);
+    const r = await gitOrThrow(["init"], cwd);
+    await audit({ tool: "git_init", action: "git", target: cwd, status: "ok" });
+    return toolResult("git_init", { path: cwd, output: r.stdout || r.stderr || "Git repository initialized" });
   });
 
   server.registerTool("git_diff", {
@@ -357,9 +404,9 @@ export function registerGitTools(server: McpServer, defaultCwd: string): void {
   server.registerTool("git_worktree", { title: "Git worktrees", inputSchema: {
     path: z.string().optional(), action: z.enum(["list", "add"]), directory: z.string().optional(), branch: ref.optional(),
   }, annotations: toolAnnotations("command") }, async ({ path: p, action, directory, branch }) => {
-    requireUnrestrictedExecution();
     const cwd = await repo(p);
     if (action === "list") return toolResult("git_worktree", await gitOrThrow(["worktree", "list", "--porcelain"], cwd));
+    requireUnrestrictedExecution();
     if (!directory || !branch) throw new Error("directory and new branch are required");
     const target = await validatePath(directory);
     return toolResult("git_worktree", await gitOrThrow(["worktree", "add", "-b", branch, "--", target], cwd));

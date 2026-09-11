@@ -9,7 +9,6 @@ let selectedTaskId = null;
 let streamAbort = null;
 let streamGeneration = 0;
 let streamingProcessId = null;
-let shellOutputActive = false;
 let paused = false;
 let follow = true;
 let newLines = 0;
@@ -26,7 +25,7 @@ function lineCount(text) {
 function viewFor(id) {
   let view = views.get(id);
   if (!view) {
-    view = { cursor: null, text: '', initialized: false, running: null, exitCode: null, hasMore: false, dropped: false };
+    view = { cursor: null, text: '', initialized: false, running: null, exitCode: null, hasMore: false, dropped: false, command: '', cwd: '' };
     views.set(id, view);
   }
   return view;
@@ -34,14 +33,14 @@ function viewFor(id) {
 
 function setNewLines(count) {
   newLines = count;
-  const badge = $('terminal-new-lines');
+  const badge = $('process-console-new-lines');
   badge.hidden = count <= 0;
   badge.textContent = `${count} new`;
 }
 
 function renderCurrent(forceLatest = false) {
   if (!selectedProcessId) return;
-  const output = $('terminal-output');
+  const output = $('process-console-output');
   const view = viewFor(selectedProcessId);
   const keepTop = output.scrollTop;
   output.textContent = view.text || 'Process has not produced output yet.';
@@ -52,7 +51,7 @@ function renderCurrent(forceLatest = false) {
 
 function appendChunk(view, chunk) {
   if (!chunk) return;
-  const output = $('terminal-output');
+  const output = $('process-console-output');
   const isCurrent = Boolean(selectedProcessId && views.get(selectedProcessId) === view);
   const wasNearBottom = isCurrent && nearBottom(output);
   const beforeLength = view.text.length;
@@ -91,8 +90,8 @@ function applyProcessOutput(view, result) {
   view.exitCode = result.exit_code ?? null;
   view.hasMore = Boolean(result.has_more);
   if (selectedProcessId && views.get(selectedProcessId) === view) {
-    $('terminal-state').textContent = view.running ? '● running' : `exit ${view.exitCode ?? '—'}`;
-    $('terminal-stop').disabled = !view.running;
+    $('process-console-state').textContent = view.running ? '● running' : `exit ${view.exitCode ?? '—'}`;
+    $('process-console-stop').disabled = !view.running;
   }
 }
 
@@ -122,7 +121,7 @@ async function streamProcess(taskId, processId) {
     }
   } catch (error) {
     if (error.name !== 'AbortError' && selectedProcessId === processId) {
-      $('terminal-state').textContent = 'Output unavailable';
+      $('process-console-state').textContent = 'Output unavailable';
       appendChunk(view, `\n[stream error] ${error.message}\n`);
     }
   } finally {
@@ -134,8 +133,8 @@ async function streamProcess(taskId, processId) {
 }
 
 function renderProcessOptions(processes) {
-  const select = $('terminal-process-select');
-  const options = [Object.assign(document.createElement('option'), { value: '', textContent: 'No process' })];
+  const select = $('process-console-select');
+  const options = [Object.assign(document.createElement('option'), { value: '', textContent: 'No running process' })];
   for (const process of processes) {
     const prefix = process.running ? '●' : `×${process.exit_code ?? ''}`;
     options.push(Object.assign(document.createElement('option'), {
@@ -153,32 +152,43 @@ export function selectProcess(id) {
   streamAbort?.abort();
   streamAbort = null;
   streamingProcessId = null;
-  shellOutputActive = false;
   selectedProcessId = id || null;
   selectedTaskId = selectedProcessId ? state.taskId : null;
   setNewLines(0);
-  $('terminal-process-select').value = selectedProcessId || '';
+  $('process-console-select').value = selectedProcessId || '';
   if (!selectedProcessId || !state.taskId) {
-    $('terminal-output').textContent = 'No process selected.';
-    $('terminal-state').textContent = 'Ready';
-    $('terminal-stop').disabled = true;
+    $('process-console-current').textContent = '—';
+    $('process-console-output').textContent = 'No process selected.';
+    $('process-console-state').textContent = 'Ready';
+    $('process-console-stop').disabled = true;
     return;
   }
   const view = viewFor(selectedProcessId);
-  $('terminal-output').textContent = view.text || 'Process has not produced output yet.';
-  $('terminal-state').textContent = view.running === false ? `exit ${view.exitCode ?? '—'}` : 'Connecting…';
-  $('terminal-stop').disabled = view.running === false;
-  if (follow) $('terminal-output').scrollTop = $('terminal-output').scrollHeight;
+  $('process-console-current').textContent = view.command || selectedProcessId;
+  $('process-console-current').title = view.cwd ? `${view.command} · ${view.cwd}` : view.command;
+  $('process-console-output').textContent = view.text || 'Process has not produced output yet.';
+  $('process-console-state').textContent = view.running === false ? `exit ${view.exitCode ?? '—'}` : 'Connecting…';
+  $('process-console-stop').disabled = view.running === false;
+  if (follow) $('process-console-output').scrollTop = $('process-console-output').scrollHeight;
   void streamProcess(selectedTaskId, selectedProcessId);
 }
 
 export async function loadProcesses(options = {}) {
-  if (!state.taskId) { resetTerminal(); return; }
+  if (!state.taskId) { resetProcessConsole(); return; }
   const taskId = state.taskId;
   const result = await api(`/api/workbench/tasks/${encodeURIComponent(taskId)}/processes`);
   if (state.taskId !== taskId) return;
-  const processes = result.processes || [];
-  $('terminal-process-count').textContent = `${processes.length} job${processes.length === 1 ? '' : 's'}`;
+  const processes = (result.processes || []).filter(process => process.running);
+  const panel = $('process-console');
+  panel.hidden = processes.length === 0;
+  $('process-console-count').textContent = `${processes.length} running`;
+  for (const process of processes) {
+    const view = viewFor(process.id);
+    view.command = process.command || '';
+    view.cwd = process.cwd || '';
+    view.running = true;
+    view.exitCode = null;
+  }
   const ids = new Set(processes.map(process => process.id));
   const preferred = options.selectId && ids.has(options.selectId) ? options.selectId
     : selectedProcessId && ids.has(selectedProcessId) ? selectedProcessId
@@ -189,7 +199,6 @@ export async function loadProcesses(options = {}) {
     selectedTaskId = null;
   }
   renderProcessOptions(processes);
-  if (shellOutputActive && !options.selectId && !selectedProcessId) return;
   if (preferred !== selectedProcessId) {
     selectProcess(preferred);
     return;
@@ -203,113 +212,82 @@ export async function loadProcesses(options = {}) {
   const view = viewFor(selectedProcessId);
   view.running = process.running;
   view.exitCode = process.exit_code ?? null;
-  $('terminal-state').textContent = process.running ? '● running' : `exit ${process.exit_code ?? '—'}`;
-  $('terminal-stop').disabled = !process.running;
+  view.command = process.command || view.command;
+  view.cwd = process.cwd || view.cwd;
+  $('process-console-current').textContent = view.command || process.id;
+  $('process-console-current').title = view.cwd ? `${view.command} · ${view.cwd}` : view.command;
+  $('process-console-state').textContent = '● running';
+  $('process-console-stop').disabled = false;
   if (process.running && streamingProcessId !== selectedProcessId) {
     selectedTaskId = taskId;
     void streamProcess(taskId, selectedProcessId);
   }
 }
 
-async function runOnce(command) {
-  const taskId = state.taskId;
-  if (!taskId) return;
-  setStatus('Running command…');
-  const result = await api(`/api/workbench/tasks/${encodeURIComponent(taskId)}/shell`, { method: 'POST', body: { command } });
-  if (state.taskId !== taskId) return;
+export function resetProcessConsole() {
   streamGeneration += 1;
   streamAbort?.abort();
   streamAbort = null;
   streamingProcessId = null;
   selectedProcessId = null;
   selectedTaskId = null;
-  shellOutputActive = true;
-  $('terminal-process-select').value = '';
-  const text = [`› ${command}`, result.stdout || '', result.stderr ? `[stderr]\n${result.stderr}` : '', `exit ${result.exit_code}`].filter(Boolean).join('\n');
-  $('terminal-output').textContent = text;
-  $('terminal-state').textContent = `shell · exit ${result.exit_code}`;
-  $('terminal-stop').disabled = true;
-  $('terminal-output').scrollTop = $('terminal-output').scrollHeight;
-  setNewLines(0);
-  setStatus(`Command exit ${result.exit_code}`);
-}
-
-async function startBackground(command) {
-  const taskId = state.taskId;
-  if (!taskId) return;
-  setStatus('Starting background process…');
-  const started = await api(`/api/workbench/tasks/${encodeURIComponent(taskId)}/processes`, { method: 'POST', body: { command, yield_time_ms: 300 } });
-  if (state.taskId !== taskId) return;
-  await loadProcesses({ selectId: started.id });
-  setStatus(`Started ${started.id}`);
-}
-
-export function resetTerminal() {
-  streamGeneration += 1;
-  streamAbort?.abort();
-  streamAbort = null;
-  streamingProcessId = null;
-  selectedProcessId = null;
-  selectedTaskId = null;
-  shellOutputActive = false;
   views.clear();
   paused = false;
   follow = true;
   newLines = 0;
-  if ($('terminal-new-lines')) setNewLines(0);
-  if ($('terminal-follow')) $('terminal-follow').checked = true;
-  if ($('terminal-pause')) { $('terminal-pause').textContent = 'Pause'; $('terminal-pause').classList.remove('active'); }
-  if ($('terminal-process-select')) $('terminal-process-select').replaceChildren(Object.assign(document.createElement('option'), { value: '', textContent: 'No process' }));
-  if ($('terminal-process-count')) $('terminal-process-count').textContent = '0 jobs';
-  if ($('terminal-state')) $('terminal-state').textContent = 'Ready';
-  if ($('terminal-stop')) $('terminal-stop').disabled = true;
-  if ($('terminal-output')) $('terminal-output').textContent = 'No process selected.';
+  if ($('process-console')) { $('process-console').hidden = true; $('process-console').classList.remove('expanded'); }
+  if ($('process-console-new-lines')) setNewLines(0);
+  if ($('process-console-follow')) $('process-console-follow').checked = true;
+  if ($('process-console-pause')) { $('process-console-pause').textContent = 'Pause'; $('process-console-pause').classList.remove('active'); }
+  if ($('process-console-toggle')) { $('process-console-toggle').textContent = 'Logs'; $('process-console-toggle').setAttribute('aria-expanded', 'false'); }
+  if ($('process-console-select')) $('process-console-select').replaceChildren(Object.assign(document.createElement('option'), { value: '', textContent: 'No running process' }));
+  if ($('process-console-count')) $('process-console-count').textContent = '0 running';
+  if ($('process-console-current')) $('process-console-current').textContent = '—';
+  if ($('process-console-state')) $('process-console-state').textContent = 'Ready';
+  if ($('process-console-stop')) $('process-console-stop').disabled = true;
+  if ($('process-console-output')) $('process-console-output').textContent = 'No process selected.';
 }
 
-export function setupTerminal() {
-  $('terminal-process-select').onchange = () => selectProcess($('terminal-process-select').value);
-  $('terminal-follow').onchange = () => {
-    follow = $('terminal-follow').checked;
+export function setupProcessConsole() {
+  $('process-console-select').onchange = () => selectProcess($('process-console-select').value);
+  $('process-console-follow').onchange = () => {
+    follow = $('process-console-follow').checked;
     if (follow) renderCurrent(true);
   };
-  $('terminal-output').onscroll = () => {
-    if (follow && !nearBottom($('terminal-output'))) {
+  $('process-console-output').onscroll = () => {
+    if (follow && !nearBottom($('process-console-output'))) {
       follow = false;
-      $('terminal-follow').checked = false;
+      $('process-console-follow').checked = false;
     }
   };
-  $('terminal-pause').onclick = () => {
+  $('process-console-pause').onclick = () => {
     paused = !paused;
-    $('terminal-pause').textContent = paused ? 'Resume' : 'Pause';
-    $('terminal-pause').classList.toggle('active', paused);
+    $('process-console-pause').textContent = paused ? 'Resume' : 'Pause';
+    $('process-console-pause').classList.toggle('active', paused);
     if (!paused && selectedProcessId) renderCurrent(false);
   };
-  $('terminal-latest').onclick = () => {
+  $('process-console-latest').onclick = () => {
     paused = false;
     follow = true;
-    $('terminal-follow').checked = true;
-    $('terminal-pause').textContent = 'Pause';
-    $('terminal-pause').classList.remove('active');
+    $('process-console-follow').checked = true;
+    $('process-console-pause').textContent = 'Pause';
+    $('process-console-pause').classList.remove('active');
     if (selectedProcessId) renderCurrent(true);
-    else $('terminal-output').scrollTop = $('terminal-output').scrollHeight;
+    else $('process-console-output').scrollTop = $('process-console-output').scrollHeight;
   };
-  $('terminal-stop').onclick = () => void (async () => {
+  $('process-console-stop').onclick = () => void (async () => {
     if (!state.taskId || !selectedProcessId) return;
+    $('process-console-stop').disabled = true;
+    setStatus('Stopping process…');
     await api(`/api/workbench/tasks/${encodeURIComponent(state.taskId)}/processes/${encodeURIComponent(selectedProcessId)}/stop`, { method: 'POST', body: { force: false } });
-    await loadProcesses({ selectId: selectedProcessId });
+    await loadProcesses();
+    setStatus('Process stopped');
   })().catch(error => setStatus(error.message));
-  $('terminal-toggle').onclick = () => {
-    const collapsed = $('terminal-panel').classList.toggle('collapsed');
-    $('terminal-toggle').textContent = collapsed ? '⌃' : '⌄';
-    $('terminal-toggle').title = collapsed ? 'Expand terminal' : 'Collapse terminal';
-  };
-  $('terminal-command-form').onsubmit = event => {
-    event.preventDefault();
-    const command = $('terminal-command').value.trim();
-    if (command) void runOnce(command).catch(error => setStatus(error.message));
-  };
-  $('terminal-start').onclick = () => {
-    const command = $('terminal-command').value.trim();
-    if (command) void startBackground(command).catch(error => setStatus(error.message));
+  $('process-console-toggle').onclick = () => {
+    const panel = $('process-console');
+    const expanded = panel.classList.toggle('expanded');
+    $('process-console-toggle').textContent = expanded ? 'Hide logs' : 'Logs';
+    $('process-console-toggle').setAttribute('aria-expanded', String(expanded));
+    if (expanded && selectedProcessId) renderCurrent(true);
   };
 }

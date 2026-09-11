@@ -66,12 +66,14 @@ function setupTheme(monaco) {
       'editorGutter.background': '#181818',
       'editorWidget.background': '#202020',
       'editorWidget.border': '#343434',
-      'diffEditor.insertedTextBackground': '#33653d99',
-      'diffEditor.removedTextBackground': '#7c394288',
+      // Keep word-level diff paint visually identical to the line background.
+      // Monaco still computes intraline changes, but we do not draw darker token boxes.
+      'diffEditor.insertedTextBackground': '#223124',
+      'diffEditor.removedTextBackground': '#44272b',
       'diffEditor.insertedLineBackground': '#223124',
-      'diffEditor.removedLineBackground': '#44272be6',
-      'diffEditor.insertedTextBorder': '#5fc97566',
-      'diffEditor.removedTextBorder': '#f8514966',
+      'diffEditor.removedLineBackground': '#44272b',
+      'diffEditor.insertedTextBorder': '#00000000',
+      'diffEditor.removedTextBorder': '#00000000',
       'diffEditorGutter.insertedLineBackground': '#5fc975',
       'diffEditorGutter.removedLineBackground': '#f85149',
       'diffEditor.unchangedRegionBackground': '#2a2a2a',
@@ -141,18 +143,62 @@ export function reconstructUnifiedDiff(diff = '') {
   const modified = [];
   const originalLineNumbers = [];
   const modifiedLineNumbers = [];
+  const originalKinds = [];
+  const modifiedKinds = [];
+  const originalIntraline = [];
+  const modifiedIntraline = [];
+  let pendingRemovals = [];
+  let pendingAdditions = [];
   let inHunk = false;
   let hunks = 0;
   let oldLine = null;
   let newLine = null;
+
+  const fullTextRange = (entry, target) => {
+    if (!entry?.text?.length) return;
+    target.push({ line: entry.line, startColumn: 1, endColumn: entry.text.length + 1 });
+  };
+
+  const changedTextRanges = (before, after) => {
+    let prefix = 0;
+    const shared = Math.min(before.text.length, after.text.length);
+    while (prefix < shared && before.text[prefix] === after.text[prefix]) prefix += 1;
+
+    let suffix = 0;
+    const beforeRemaining = before.text.length - prefix;
+    const afterRemaining = after.text.length - prefix;
+    while (
+      suffix < beforeRemaining
+      && suffix < afterRemaining
+      && before.text[before.text.length - 1 - suffix] === after.text[after.text.length - 1 - suffix]
+    ) suffix += 1;
+
+    const beforeEnd = before.text.length - suffix;
+    const afterEnd = after.text.length - suffix;
+    if (beforeEnd > prefix) originalIntraline.push({ line: before.line, startColumn: prefix + 1, endColumn: beforeEnd + 1 });
+    if (afterEnd > prefix) modifiedIntraline.push({ line: after.line, startColumn: prefix + 1, endColumn: afterEnd + 1 });
+  };
+
+  const flushChangeBlock = () => {
+    const paired = Math.min(pendingRemovals.length, pendingAdditions.length);
+    for (let index = 0; index < paired; index += 1) changedTextRanges(pendingRemovals[index], pendingAdditions[index]);
+    pendingRemovals.slice(paired).forEach(entry => fullTextRange(entry, originalIntraline));
+    pendingAdditions.slice(paired).forEach(entry => fullTextRange(entry, modifiedIntraline));
+    pendingRemovals = [];
+    pendingAdditions = [];
+  };
+
   for (const line of String(diff).replace(/\r\n/g, '\n').split('\n')) {
     const hunk = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
     if (hunk) {
+      flushChangeBlock();
       if (hunks > 0) {
         original.push('');
         modified.push('');
         originalLineNumbers.push(null);
         modifiedLineNumbers.push(null);
+        originalKinds.push('gap');
+        modifiedKinds.push('gap');
       }
       hunks += 1;
       inHunk = true;
@@ -162,25 +208,39 @@ export function reconstructUnifiedDiff(diff = '') {
     }
     if (!inHunk || line.startsWith('\\ No newline at end of file')) continue;
     if (line.startsWith('+') && !line.startsWith('+++')) {
-      modified.push(line.slice(1));
+      const text = line.slice(1);
+      modified.push(text);
       modifiedLineNumbers.push(newLine++);
+      modifiedKinds.push('add');
+      pendingAdditions.push({ line: modified.length, text });
     }
     else if (line.startsWith('-') && !line.startsWith('---')) {
-      original.push(line.slice(1));
+      const text = line.slice(1);
+      original.push(text);
       originalLineNumbers.push(oldLine++);
+      originalKinds.push('remove');
+      pendingRemovals.push({ line: original.length, text });
     }
     else if (line.startsWith(' ')) {
+      flushChangeBlock();
       original.push(line.slice(1));
       modified.push(line.slice(1));
       originalLineNumbers.push(oldLine++);
       modifiedLineNumbers.push(newLine++);
+      originalKinds.push('context');
+      modifiedKinds.push('context');
     }
   }
+  flushChangeBlock();
   return {
     original: original.join('\n'),
     modified: modified.join('\n'),
     originalLineNumbers,
     modifiedLineNumbers,
+    originalKinds,
+    modifiedKinds,
+    originalIntraline,
+    modifiedIntraline,
     hunks,
     parsed: hunks > 0,
   };

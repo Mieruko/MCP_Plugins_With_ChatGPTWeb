@@ -1,12 +1,12 @@
 import { api, getAdminToken, setAdminToken } from './api.js';
 import { state, currentTask, currentWorkspace, resetTaskView } from './state.js';
 import { $, basename, el, setStatus } from './dom.js';
-import { loadTree, goUpTree, searchWorkspace } from './explorer.js';
+import { loadTree, collapseTree, searchWorkspace } from './explorer.js';
 import { hasUnsavedEditorChanges, reconcileEditorState, reloadActiveEditor, resetEditor, saveActiveEditor } from './editor.js';
-import { commitStaged, decideCurrentOperation, loadChanges, openPrimaryReview, setAgentFilter, setChangeFilter, showChangesTab, stageAllChanges, unstageAllChanges } from './changes.js';
+import { commitStaged, createBranch, decideCurrentOperation, fetchBranches, loadChanges, loadConnections, openBranchDialog, openPrimaryReview, runEnvironmentPrimaryAction, setAgentFilter, setChangeFilter, showChangesTab, stageAllChanges, unstageAllChanges } from './changes.js';
 import { loadAgents } from './agents.js';
 import { createCheckpoint, loadHistory, restoreCurrentCheckpoint } from './history.js';
-import { loadProcesses, resetTerminal, setupTerminal } from './terminal.js';
+import { loadProcesses, resetProcessConsole, setupProcessConsole } from './terminal.js';
 
 let eventsController;
 let refreshTimer;
@@ -37,6 +37,10 @@ function workspaceKey(value) {
 
 function selectedPolicyMode() {
   return document.querySelector('input[name="policy-mode"]:checked')?.value || 'ask';
+}
+
+function selectedTaskEnvironment() {
+  return document.querySelector('input[name="task-environment"]:checked')?.value || 'local';
 }
 
 function setSelectedPolicyMode(mode) {
@@ -75,6 +79,7 @@ function renderContextPanels() {
   const workspaces = state.data?.workspaces || [];
   const workspace = currentWorkspace();
   const workspacePath = workspace?.path || task?.workspace || '';
+  const executionPath = task?.execution?.path || workspacePath;
   const workspaceName = workspace?.name || (workspacePath ? basename(workspacePath) : 'No workspace');
 
   $('context-workspace-name').textContent = workspaceName;
@@ -115,9 +120,9 @@ function renderContextPanels() {
   $('new-task-workspace').value = workspacePath;
 
   $('permission-workspace-name').textContent = workspaceName;
-  $('permission-workspace-path').textContent = workspacePath || '—';
-  $('policy-scope-help').textContent = workspacePath
-    ? `ChatGPT can only access files inside ${workspacePath}.`
+  $('permission-workspace-path').textContent = executionPath || '—';
+  $('policy-scope-help').textContent = executionPath
+    ? `ChatGPT can only access files inside ${executionPath}.`
     : 'ChatGPT can only access files inside this workspace.';
 
   $('settings-workspace-name').textContent = workspaceName;
@@ -154,9 +159,6 @@ function renderHeader() {
     setSelectedPolicyMode(task.policy.mode);
     $('policy-scope').checked = task.policy.workspaceOnly;
   }
-  $('branch-name').textContent = state.git?.branch || '—';
-  const head = state.git?.head_oid ? state.git.head_oid.slice(0, 8) : '';
-  $('branch-meta').textContent = task ? (state.git ? `↑${state.git.ahead || 0} ↓${state.git.behind || 0}${head ? ` · ${head}` : ''}` : 'Git unavailable') : 'Create a task';
   $('status-workspace').replaceChildren(el('i', '', 'dot'), document.createTextNode(`${workspaceName} ready`));
   renderContextPanels();
 }
@@ -174,7 +176,7 @@ function renderMcpSettings(health) {
   $('mcp-dialog-sessions').textContent = `${health.active_sessions || 0} active session${health.active_sessions === 1 ? '' : 's'}`;
   $('mcp-dialog-public').textContent = publicUrl ? publicUrl.replace(/^https?:\/\//, '') : 'Local only';
   $('mcp-dialog-profile').textContent = `${health.tool_profile || 'slim'} tool profile`;
-  $('mcp-dialog-workspace').textContent = health.default_cwd || currentTask()?.workspace || '—';
+  $('mcp-dialog-workspace').textContent = currentTask()?.execution?.path || health.default_cwd || currentTask()?.workspace || '—';
   const bytes = health.instructions?.instruction_bytes;
   $('mcp-dialog-instructions').textContent = bytes ? `${Math.round(bytes / 1024)} KB injected context` : 'No summary';
   $('mcp-upstream-count').textContent = `${connected}/${upstream.length} connected`;
@@ -427,8 +429,9 @@ async function fullRefresh() {
   setStatus('Refreshing…');
   const data = await loadWorkbenchState();
   renderHeader();
+  await loadConnections();
   if (!state.taskId) {
-    resetTerminal();
+    resetProcessConsole();
     await loadAgents();
     setStatus('Create a task to start');
     return;
@@ -436,7 +439,7 @@ async function fullRefresh() {
   await Promise.allSettled([loadAgents(), loadMcpSettings()]);
   await loadChanges();
   renderHeader();
-  await Promise.allSettled([loadTree(state.currentTreePath), loadHistory(), loadProcesses()]);
+  await Promise.allSettled([loadTree(), loadHistory(), loadProcesses()]);
   renderHeader();
   setStatus('Ready');
 }
@@ -451,7 +454,7 @@ async function connect(token) {
   clearInterval(liveTimer);
   liveTimer = setInterval(() => {
     if (!state.connected) return;
-    void Promise.allSettled([loadAgents(), loadProcesses()]).then(renderHeader);
+    void Promise.allSettled([loadAgents(), loadProcesses(), loadConnections()]).then(renderHeader);
   }, 15000);
 }
 
@@ -469,12 +472,16 @@ async function refreshTypedScopes(scopes, eventTaskIds) {
     await loadAgents();
     return;
   }
+  const workspaceTaskIds = new Set((state.data?.tasks || [])
+    .filter(task => task.workspaceId === state.workspaceId)
+    .map(task => task.id));
+  const affectsCurrentWorkspace = !eventTaskIds?.size || [...eventTaskIds].some(taskId => workspaceTaskIds.has(taskId));
   const jobs = [];
   if (scopes.has('workspaces') || scopes.has('tasks') || scopes.has('operations')) jobs.push(loadAgents());
-  if (affectsCurrentTask && (scopes.has('operations') || scopes.has('workspace'))) jobs.push(loadChanges());
+  if (affectsCurrentWorkspace && (scopes.has('operations') || scopes.has('workspace'))) jobs.push(loadChanges());
   if (affectsCurrentTask && (scopes.has('operations') || scopes.has('workspace'))) jobs.push(loadProcesses());
-  if (affectsCurrentTask && (scopes.has('operations') || scopes.has('checkpoints'))) jobs.push(loadHistory());
-  if (affectsCurrentTask && scopes.has('workspace')) jobs.push(loadTree(state.currentTreePath));
+  if (affectsCurrentWorkspace && (scopes.has('operations') || scopes.has('checkpoints'))) jobs.push(loadHistory());
+  if (affectsCurrentTask && scopes.has('workspace')) jobs.push(loadTree());
   await Promise.allSettled(jobs);
   renderHeader();
   setStatus('Ready');
@@ -535,7 +542,7 @@ async function switchTask(taskId) {
   state.taskId = taskId;
   resetTaskView();
   resetEditor();
-  resetTerminal();
+  resetProcessConsole();
   await fullRefresh();
   setStatus('Task selected for this workspace and new ChatGPT sessions');
 }
@@ -548,7 +555,7 @@ async function switchWorkspace(workspaceId) {
   state.taskId = null;
   resetTaskView();
   resetEditor();
-  resetTerminal();
+  resetProcessConsole();
   await fullRefresh();
   setStatus(currentTask() ? 'Workspace and task selected for new ChatGPT sessions' : 'Workspace selected · create a task to start');
 }
@@ -598,7 +605,7 @@ function openAddWorkspaceDialog() {
 }
 
 function setupEvents() {
-  setupTerminal();
+  setupProcessConsole();
   $('connect-form').onsubmit = event => {
     event.preventDefault();
     const token = $('token').value.trim();
@@ -681,23 +688,44 @@ function setupEvents() {
     if (!$('add-workspace-name').value.trim()) $('add-workspace-name').placeholder = basename($('add-workspace-path').value.trim() || 'workspace');
   };
   $('create-workspace').onclick = () => void (async () => {
+    const submit = $('create-workspace');
+    if (submit.disabled) return;
     const workspacePath = $('add-workspace-path').value.trim();
     const name = $('add-workspace-name').value.trim();
     if (!workspacePath) throw new Error('Choose a workspace folder.');
-    const workspace = await api('/api/workbench/workspaces', { method: 'POST', body: { name, path: workspacePath } });
-    await api(`/api/workbench/workspaces/${workspace.id}/select`, { method: 'POST', body: {} });
-    state.workspaceId = workspace.id;
-    state.taskId = null;
-    resetTaskView();
-    resetEditor();
-    resetTerminal();
-    $('add-workspace-dialog').close();
-    await fullRefresh();
-    setStatus('Workspace added · create a task when you are ready');
+    $('add-workspace-error').hidden = true;
+    submit.disabled = true;
+    submit.textContent = 'Adding…';
+    let workspace;
+    try {
+      workspace = await api('/api/workbench/workspaces', { method: 'POST', body: { name, path: workspacePath } });
+      await api(`/api/workbench/workspaces/${workspace.id}/select`, { method: 'POST', body: {} });
+      state.workspaceId = workspace.id;
+      state.taskId = null;
+      resetTaskView();
+      resetEditor();
+      resetProcessConsole();
+      $('add-workspace-dialog').close();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Add workspace';
+    }
+    try {
+      await fullRefresh();
+      setStatus('Workspace added · create a task when you are ready');
+    } catch (error) {
+      setStatus(`Workspace added · refresh failed: ${error.message}`);
+      scheduleTypedRefresh({ scopes: ['state'] });
+    }
   })().catch(showWorkspaceError);
   $('new-task-button').onclick = () => {
     renderContextPanels();
     $('new-task-title').value = '';
+    $('new-task-error').hidden = true;
+    const local = document.querySelector('input[name="task-environment"][value="local"]');
+    if (local) local.checked = true;
+    $('new-task-starting-ref-field').hidden = true;
+    $('new-task-starting-ref').value = state.git?.branch || 'main';
     closeDialog('context-dialog');
     $('new-task-dialog').showModal();
     queueMicrotask(() => $('new-task-title').focus());
@@ -705,14 +733,34 @@ function setupEvents() {
   document.querySelectorAll('[data-close-dialog]').forEach(button => {
     button.onclick = () => $(button.dataset.closeDialog).close();
   });
-  $('tree-refresh').onclick = () => void loadTree(state.currentTreePath).catch(error => setStatus(error.message));
-  $('tree-up').onclick = () => void goUpTree().catch(error => setStatus(error.message));
+  $('tree-refresh').onclick = () => void loadTree().catch(error => setStatus(error.message));
+  $('tree-collapse').onclick = () => void collapseTree().catch(error => setStatus(error.message));
   $('reload-editor').onclick = () => void reloadActiveEditor().catch(error => setStatus(error.message));
   $('save-editor').onclick = () => void saveActiveEditor().catch(error => setStatus(error.message));
   $('refresh-changes').onclick = () => void loadChanges().then(renderHeader).catch(error => setStatus(error.message));
+  $('environment-refresh').onclick = () => void loadChanges().then(renderHeader).catch(error => setStatus(error.message));
+  $('environment-changes').onclick = () => showChangesTab('changes');
+  $('environment-branch').onclick = () => void openBranchDialog().catch(error => setStatus(error.message));
+  $('environment-primary-action').onclick = () => void runEnvironmentPrimaryAction().catch(error => setStatus(error.message));
+  $('branch-fetch').onclick = () => void fetchBranches().catch(error => {
+    $('branch-dialog-error').textContent = error.message;
+    $('branch-dialog-error').hidden = false;
+    setStatus(error.message);
+  });
+  $('branch-create').onclick = () => void createBranch().catch(error => {
+    $('branch-dialog-error').textContent = error.message;
+    $('branch-dialog-error').hidden = false;
+    setStatus(error.message);
+  });
+  document.querySelectorAll('input[name="task-environment"]').forEach(input => {
+    input.onchange = () => {
+      $('new-task-starting-ref-field').hidden = selectedTaskEnvironment() !== 'worktree';
+      if (!$('new-task-starting-ref').value.trim()) $('new-task-starting-ref').value = state.git?.branch || 'main';
+    };
+  });
   $('search-toggle').onclick = () => {
-    $('search-panel').hidden = !$('search-panel').hidden;
-    if (!$('search-panel').hidden) $('search-query').focus();
+    $('search-panel').hidden = false;
+    $('search-query').focus();
   };
   let searchTimer;
   $('search-query').oninput = () => {
@@ -743,25 +791,50 @@ function setupEvents() {
     $('permissions-dialog').close(); await fullRefresh();
   })().catch(error => setStatus(error.message));
   $('create-task').onclick = () => void (async () => {
+    const submit = $('create-task');
+    if (submit.disabled) return;
     const title = $('new-task-title').value.trim();
     const workspace = currentWorkspace();
     const workspacePath = workspace?.path || $('new-task-workspace').value.trim();
+    const environmentMode = selectedTaskEnvironment();
+    const startingRef = $('new-task-starting-ref').value.trim() || state.git?.branch || 'HEAD';
     if (!title) throw new Error('Enter a task name.');
     if (!workspace && !workspacePath) throw new Error('Choose a workspace first.');
-    const task = await api('/api/workbench/tasks', {
-      method: 'POST',
-      body: workspace ? { title, workspaceId: workspace.id } : { title, workspace: workspacePath },
-    });
-    await api(`/api/workbench/tasks/${task.id}/select`, { method: 'POST', body: {} });
-    state.workspaceId = task.workspaceId || state.workspaceId;
-    state.taskId = task.id;
-    resetTaskView();
-    resetEditor();
-    resetTerminal();
-    $('new-task-dialog').close();
-    await fullRefresh();
-    setStatus('New task created and selected for new ChatGPT sessions');
-  })().catch(error => setStatus(error.message));
+    $('new-task-error').hidden = true;
+    submit.disabled = true;
+    submit.textContent = 'Creating…';
+    let task;
+    try {
+      task = await api('/api/workbench/tasks', {
+        method: 'POST',
+        body: {
+          ...(workspace ? { title, workspaceId: workspace.id } : { title, workspace: workspacePath }),
+          environment: environmentMode === 'worktree' ? { mode: 'worktree', startingRef } : { mode: 'local' },
+        },
+      });
+      await api(`/api/workbench/tasks/${task.id}/select`, { method: 'POST', body: {} });
+      state.workspaceId = task.workspaceId || state.workspaceId;
+      state.taskId = task.id;
+      resetTaskView();
+      resetEditor();
+      resetProcessConsole();
+      $('new-task-dialog').close();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Create task';
+    }
+    try {
+      await fullRefresh();
+      setStatus('New task created and selected for new ChatGPT sessions');
+    } catch (error) {
+      setStatus(`Task created · refresh failed: ${error.message}`);
+      scheduleTypedRefresh({ scopes: ['state'] });
+    }
+  })().catch(error => {
+    $('new-task-error').textContent = error?.message || String(error);
+    $('new-task-error').hidden = false;
+    setStatus($('new-task-error').textContent);
+  });
   window.addEventListener('workbench:git-updated', renderHeader);
   window.addEventListener('workbench:refresh-request', event => scheduleTypedRefresh(event.detail || { scopes: ['state'] }));
   window.addEventListener('workbench:switch-task', event => void switchTask(event.detail?.taskId).catch(error => setStatus(error.message)));

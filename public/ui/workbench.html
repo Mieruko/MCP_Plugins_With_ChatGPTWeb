@@ -32,12 +32,6 @@
         </span>
       </button>
 
-      <div class="top-meta branch-meta">
-        <small>Branch</small>
-        <strong id="branch-name">—</strong>
-        <span id="branch-meta">—</span>
-      </div>
-
       <button id="policy-button" class="policy-button" type="button">Ask</button>
 
       <button id="mcp-button" class="mcp-state mcp-link" type="button" title="Open MCP settings">
@@ -50,6 +44,32 @@
 
     <main class="workspace-layout">
       <aside class="left-rail">
+        <section class="rail-section environment-section">
+          <div class="section-head environment-head">
+            <strong>ENVIRONMENT</strong>
+            <button id="environment-refresh" class="icon-button small" type="button" title="Refresh environment">↻</button>
+          </div>
+          <div class="environment-card">
+            <button id="environment-branch" class="environment-context-button" type="button" disabled>
+              <span class="environment-context-icon">⑂</span>
+              <span class="environment-context-copy">
+                <small id="environment-mode">Local</small>
+                <strong id="environment-branch-name">Source control unavailable</strong>
+                <span id="environment-path">—</span>
+              </span>
+              <span class="environment-context-action">Branch ›</span>
+            </button>
+            <div class="environment-actions">
+              <button id="environment-changes" class="environment-action" type="button">
+                <span>Changes</span><strong id="environment-change-count">0</strong>
+              </button>
+              <button id="environment-primary-action" class="environment-action environment-primary" type="button" disabled>
+                <span id="environment-primary-label">Commit or push</span><small id="environment-sync-meta"></small>
+              </button>
+            </div>
+          </div>
+        </section>
+
         <section class="rail-section explorer-section">
           <div class="section-head">
             <strong>EXPLORER</strong>
@@ -59,16 +79,16 @@
             </div>
           </div>
 
-          <div id="search-panel" class="search-panel" hidden>
+          <div id="search-panel" class="search-panel">
             <input id="search-query" type="search" placeholder="Search workspace…" autocomplete="off">
             <div id="search-results" class="search-results"></div>
           </div>
 
           <div class="explorer-root">
-            <button id="tree-up" class="tree-up" type="button" disabled>‹</button>
             <span class="folder-icon">▾</span>
             <strong id="explorer-root-name">Workspace</strong>
-            <span id="tree-path" class="tree-path">.</span>
+            <span id="tree-path" class="tree-path">Project tree</span>
+            <button id="tree-collapse" class="tree-collapse" type="button" title="Collapse all folders">Collapse</button>
           </div>
           <div id="file-tree" class="file-tree" aria-live="polite">
             <p class="empty-copy">Kết nối để đọc workspace.</p>
@@ -99,7 +119,10 @@
         </div>
         <div class="editor-toolbar">
           <div id="editor-breadcrumb" class="breadcrumb">Workspace</div>
-          <div class="editor-meta"><span id="editor-kind">FILE</span><span id="editor-meta">—</span></div>
+          <div class="editor-toolbar-right">
+            <button id="diff-sync-scroll" class="diff-sync-scroll" type="button" aria-pressed="true" title="Keep both diff panes vertically synchronized" hidden>⇅ Sync scroll</button>
+            <div class="editor-meta"><span id="editor-kind">FILE</span><span id="editor-meta">—</span></div>
+          </div>
         </div>
         <div id="editor-empty" class="editor-empty">
           <div class="empty-mark">◇</div>
@@ -108,34 +131,37 @@
         </div>
         <div id="code-view" class="code-view" hidden></div>
         <div id="diff-view" class="diff-view" hidden></div>
-        <section id="terminal-panel" class="terminal-panel">
-          <div class="terminal-head">
-            <div class="terminal-title"><strong>TERMINAL</strong><span id="terminal-process-count">0 jobs</span><span id="terminal-state">Ready</span></div>
-            <div class="terminal-actions">
-              <select id="terminal-process-select" aria-label="Background process"><option value="">No process</option></select>
-              <span id="terminal-new-lines" class="terminal-new-lines" hidden>0 new</span>
-              <label class="terminal-follow"><input id="terminal-follow" type="checkbox" checked>Follow</label>
-              <button id="terminal-pause" class="mini-action" type="button">Pause</button>
-              <button id="terminal-latest" class="mini-action" type="button">Latest</button>
-              <button id="terminal-stop" class="mini-action danger-mini" type="button" disabled>Stop</button>
-              <button id="terminal-toggle" class="icon-button small" type="button" title="Collapse terminal">⌄</button>
+        <section id="process-console" class="process-console" hidden>
+          <div class="process-console-head">
+            <div class="process-console-title">
+              <strong>PROCESSES</strong>
+              <span id="process-console-count">0 running</span>
+              <span id="process-console-current" class="process-console-current">—</span>
+            </div>
+            <div class="process-console-actions">
+              <select id="process-console-select" aria-label="Running process"><option value="">No running process</option></select>
+              <span id="process-console-new-lines" class="process-console-new-lines" hidden>0 new</span>
+              <button id="process-console-stop" class="mini-action danger-mini" type="button" disabled>Stop</button>
+              <button id="process-console-toggle" class="mini-action process-console-toggle" type="button" aria-expanded="false">Logs</button>
             </div>
           </div>
-          <pre id="terminal-output" class="terminal-output" aria-live="polite">No process selected.</pre>
-          <form id="terminal-command-form" class="terminal-command-form">
-            <span class="terminal-prompt">›</span>
-            <input id="terminal-command" type="text" autocomplete="off" spellcheck="false" placeholder="Run a command in this task workspace…">
-            <button id="terminal-run" class="secondary-button compact-action" type="submit">Run</button>
-            <button id="terminal-start" class="primary-button compact-action" type="button">Start background</button>
-          </form>
+          <div class="process-console-body">
+            <div class="process-console-logbar">
+              <span id="process-console-state">Ready</span>
+              <span class="process-console-log-spacer"></span>
+              <label class="process-console-follow"><input id="process-console-follow" type="checkbox" checked>Follow</label>
+              <button id="process-console-pause" class="mini-action" type="button">Pause</button>
+              <button id="process-console-latest" class="mini-action" type="button">Latest</button>
+            </div>
+            <pre id="process-console-output" class="process-console-output" aria-live="polite">No process selected.</pre>
+          </div>
         </section>
       </section>
 
       <aside class="changes-rail">
         <div class="changes-tabs">
-          <button class="changes-tab active" data-tab="changes" type="button">Changes <span id="change-count">0</span></button>
-          <button class="changes-tab" data-tab="approvals" type="button">Approvals <span id="approval-count">0</span></button>
-          <button class="changes-tab" data-tab="history" type="button">History <span id="history-count">0</span></button>
+          <button class="changes-tab active" data-tab="changes" type="button">Review <span id="change-count">0</span></button>
+          <button class="changes-tab" data-tab="history" type="button">Activity <span id="history-count">0</span></button>
         </div>
 
         <section id="changes-panel" class="changes-panel">
@@ -143,6 +169,32 @@
             <div><strong id="change-summary-title">No changes</strong><span id="change-summary-sub">Working tree clean</span></div>
             <button id="refresh-changes" class="icon-button small" type="button" title="Refresh changes">↻</button>
           </div>
+          <div id="approvals-inline" class="approvals-inline" hidden>
+            <div class="attention-head"><strong>NEEDS ATTENTION</strong><span id="approval-count">0</span></div>
+            <div id="approvals-list" class="approvals-list"></div>
+          </div>
+          <section id="workspace-review-scope" class="workspace-review-scope" hidden>
+            <div class="workspace-review-head">
+              <div class="workspace-review-identity">
+                <span class="workspace-review-mark" aria-hidden="true">+</span>
+                <div class="workspace-review-copy">
+                  <small>WORKSPACE REVIEW</small>
+                  <strong id="workspace-review-title">Edited 0 files</strong>
+                  <span class="workspace-review-subtitle">
+                    <span>Review changes</span>
+                    <span id="workspace-review-additions" class="workspace-review-additions">+0</span>
+                    <span id="workspace-review-deletions" class="workspace-review-deletions">−0</span>
+                  </span>
+                </div>
+              </div>
+              <div class="workspace-review-actions">
+                <button id="workspace-review-undo" class="workspace-review-action" type="button" hidden>Undo ↶</button>
+                <button id="workspace-review-open" class="workspace-review-action review" type="button">Review</button>
+              </div>
+            </div>
+            <div id="workspace-review-list" class="workspace-review-list"></div>
+            <button id="workspace-review-more" class="workspace-review-more" type="button" hidden>Show more files⌄</button>
+          </section>
           <div id="change-filters" class="change-filters">
             <button class="filter-chip active" data-filter="all" type="button">All <span id="filter-all-count">0</span></button>
             <button class="filter-chip" data-filter="unstaged" type="button">Modified <span id="filter-modified-count">0</span></button>
@@ -165,18 +217,9 @@
           </form>
         </section>
 
-        <section id="approvals-panel" class="approvals-panel" hidden>
-          <div class="changes-summary">
-            <div><strong>Approval queue</strong><span>Thao tác đang chờ bạn duyệt</span></div>
-          </div>
-          <div id="approvals-list" class="approvals-list">
-            <p class="empty-copy">Không có thao tác chờ duyệt.</p>
-          </div>
-        </section>
-
         <section id="history-panel" class="history-panel" hidden>
           <div class="changes-summary">
-            <div><strong>Task history</strong><span>Checkpoint và operation journal</span></div>
+            <div><strong>Activity</strong><span id="activity-scope-label">Only activity from this workspace</span></div>
             <button id="create-checkpoint-inline" class="secondary-button compact-action" type="button">+ Checkpoint</button>
           </div>
           <div class="history-group-head"><strong>CHECKPOINTS</strong><span id="checkpoint-count">0</span></div>
@@ -274,8 +317,24 @@
         <code id="new-task-workspace-path">—</code>
       </section>
       <label id="new-task-workspace-field" class="field-label" hidden>Workspace path<input id="new-task-workspace" type="text" placeholder="D:\Projects\my-app"></label>
+      <fieldset class="permission-options environment-create-options">
+        <legend>Environment</legend>
+        <label class="permission-option"><input type="radio" name="task-environment" value="local" checked><span><strong>Local</strong><small>Work directly in the project checkout.</small></span></label>
+        <label class="permission-option"><input type="radio" name="task-environment" value="worktree"><span><strong>New worktree</strong><small>Create an isolated detached checkout for this task.</small></span></label>
+      </fieldset>
+      <label id="new-task-starting-ref-field" class="field-label" hidden>Starting branch or ref<input id="new-task-starting-ref" type="text" maxlength="200" placeholder="main"></label>
       <p class="form-help">A task is the work you are doing inside this workspace. Permissions are managed separately.</p>
+      <p id="new-task-error" class="error-copy" hidden></p>
       <div class="dialog-actions"><button class="secondary-button" data-close-dialog="new-task-dialog" type="button">Cancel</button><button id="create-task" class="primary-button" type="button">Create task</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="branch-dialog" class="app-dialog compact-dialog branch-dialog">
+    <div class="dialog-head"><div><small>SOURCE CONTROL</small><h2>Branch</h2></div><button class="icon-button" data-close-dialog="branch-dialog" type="button">×</button></div>
+    <div class="dialog-body branch-dialog-body">
+      <div class="branch-dialog-actions"><button id="branch-fetch" class="secondary-button compact-action" type="button">Fetch</button><button id="branch-create" class="secondary-button compact-action" type="button">+ New branch</button></div>
+      <div id="branch-list" class="branch-list"><p class="empty-copy">Loading branches…</p></div>
+      <p id="branch-dialog-error" class="error-copy" hidden></p>
     </div>
   </dialog>
 
