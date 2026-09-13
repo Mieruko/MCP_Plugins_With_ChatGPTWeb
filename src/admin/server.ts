@@ -7,6 +7,7 @@ import type { McpSessionSummary } from "../lib/mcp-session-manager.js";
 import { createAdminRouter } from "./routes.js";
 import { adminAuth, localhostOnly } from "./localhost-guard.js";
 import { createWorkbenchRouter } from "./workbench-routes.js";
+import { createAdminBrowserSession } from "../lib/local-auth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -35,8 +36,15 @@ export function startAdminServer(options: AdminServerOptions): Server {
   app.get("/ui/", (_req, res) => res.redirect("/ui/workbench.html"));
   app.use("/ui", express.static(uiDir));
   app.use("/vendor/monaco", express.static(monacoDir));
+  app.post("/api/workbench/session", (req, res) => {
+    if (!createAdminBrowserSession(req.body?.bootstrapToken, res)) {
+      res.status(401).json({ ok: false, error: "Workbench bootstrap expired or invalid. Restart with npm start." });
+      return;
+    }
+    res.json({ ok: true });
+  });
   app.use(adminAuth);
-  app.use(createWorkbenchRouter());
+  app.use(createWorkbenchRouter({ sessionList: options.sessionList }));
 
   app.use(createAdminRouter(options.manager, {
     mcpPort: options.mcpPort,

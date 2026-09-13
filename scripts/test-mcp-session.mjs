@@ -112,7 +112,8 @@ await run("stale session auto-recovery", async () => {
   if (status !== 200) {
     throw new Error(`expected recovery HTTP 200, got ${status}: ${JSON.stringify(json)}`);
   }
-  if (!json?.result) throw new Error(`recovery missing result: ${JSON.stringify(json)}`);
+  if (!json?.result || json.result.isError || json.result.structuredContent?.ok === false) throw new Error(`recovery did not execute the tool: ${JSON.stringify(json)}`);
+  if (!JSON.stringify(json.result).includes("stale-test")) throw new Error("recovery did not return command output");
 });
 
 await run("re-initialize with stale session header", async () => {
@@ -154,7 +155,7 @@ await run("run_command after re-init", async () => {
   );
   if (status !== 200) throw new Error(`HTTP ${status}: ${JSON.stringify(json)}`);
   const text = JSON.stringify(json?.result ?? json);
-  if (!text.includes("mcp-ok") && !json?.result?.content) {
+  if (!text.includes("mcp-ok") || json?.result?.isError || json?.result?.structuredContent?.ok === false) {
     throw new Error(`unexpected result: ${text.slice(0, 300)}`);
   }
 });

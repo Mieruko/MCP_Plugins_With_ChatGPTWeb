@@ -21,6 +21,35 @@ experimental client capability, or runtime dependency. Keep the default `slim` p
    stream. Log storage is bounded to 400,000 characters per stream, even for one large chunk.
 4. Prompt and connector instructions favor batching, explicit command cwd, multi-file
    patches and cursor waits. `stop_process` is exposed in slim so jobs can be cancelled.
+5. `task_handoff` is exposed in the slim profile and remains task/session bound. Reads do
+   not claim Basic write control. Updates pass through Workbench dispatch: Ask creates one
+   pending operation, Auto/Full can update this narrow task metadata after lifecycle/writer
+   checks, and approval replay executes the original request once. File Undo does not claim
+   to restore handoff metadata.
+6. Auto memory now selects the newest complete dated notes within the configured line/byte
+   budget instead of taking the beginning of `MEMORY.md`. Oversized notes are truncated only
+   at valid UTF-8 character boundaries. Legacy free-form files fall back to a marked newest
+   tail. Omitted history remains on disk and the instruction block tells the agent how to
+   inspect it. Session initialization reads memory from the task's pinned execution root.
+7. `workbench()` now defaults to a compact `view=summary`. It includes task/execution/policy,
+   experience/write control, capabilities, pending/running/failed counts, a bounded attention
+   list and a bounded handoff excerpt. It does not include old diff bodies, command arguments
+   or operation results. `view=history` is explicit, defaults to 10 entries, caps at 30 and
+   uses a task-bound cursor. `operation_id` keeps the dedicated approval-result path.
+
+## Continuity workflow
+
+For a new ChatGPT Web conversation attached to an existing task:
+
+1. Call `workbench()` for the current binding and compact state.
+2. Call `task_handoff(action=read)` for the full current handoff.
+3. Complete a small coherent milestone and run its relevant tests.
+4. Update `task_handoff` with verified progress and the next concrete step.
+5. Use `remember` only for reusable project knowledge/decisions, not as a duplicate activity log.
+
+Pending approvals are never resubmitted automatically. A denied/expired operation does not
+write the handoff. The server cannot create a new ChatGPT conversation, increase ChatGPT
+context/quota, or force another conversation to continue.
 
 ## Examples
 
@@ -73,13 +102,26 @@ temporary workspace. It checks both MCP route aliases with an open SSE stream,
 batched inspection, output budgets, cursor eviction, background completion/failure,
 and stale-session recovery. `npm test` includes this regression suite.
 
+Continuity coverage is also part of `npm test`: `test-auto-memory.mjs` checks recent-note
+selection, line/byte budgets, UTF-8 safety, legacy fallback and invalid configuration;
+`test-continuity.mjs` exercises real slim HTTP MCP handoff permissions, task/workspace and
+execution-root isolation, summary/history pagination and operation lookup; and
+`test-handoff-expiry.mjs` proves an expired approval never invokes or writes the handoff.
+
+On the same synthetic fixture of 30 completed operations with long review bodies, the
+legacy default workbench response measured 23,309 text bytes (26,666 JSON-result bytes).
+The compact summary measured 1,449 text bytes (1,654 JSON-result bytes): a 93.8% reduction
+in text payload bytes. This is a local MCP payload measurement, not a token count or a
+ChatGPT latency/model-quality benchmark.
+
 These tests measure the local transport and tool contracts. They do not measure ChatGPT
 reasoning time, remote tunnel latency or approval UI delays. For an end-to-end comparison,
 use the same model, project snapshot and task prompts before/after. Record completion
 time, tool-call count, errors/retries and correctness; compare repeated runs.
 
 After deploying the built server, refresh the connector's tool definitions and use a new
-conversation. An old connector snapshot may omit `inspect_code` and the new cursor inputs.
+conversation. An old connector snapshot may omit `task_handoff`, `inspect_code`, or the new
+workbench view/cursor inputs.
 No `.env` edits or tunnel restart are needed just to build and test this change.
 
 References consulted:

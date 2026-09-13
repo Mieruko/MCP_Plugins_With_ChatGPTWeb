@@ -65,7 +65,7 @@ async function findContextFiles(root: string, maxDepth: number): Promise<string[
   return [...new Set(found)];
 }
 
-export function registerContextTools(server: McpServer, workspaceRoot: string): void {
+export function registerContextTools(server: McpServer, _workspaceRoot: string): void {
   server.registerTool(
     "project_context",
     {
@@ -147,7 +147,7 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
       annotations: toolAnnotations("edit"),
     },
     async ({ note }) => {
-      const file = await appendAutoMemory(workspaceRoot, note);
+      const file = await appendAutoMemory(getDefaultCwd(), note);
       await audit({ tool: "remember", action: "append", target: file, status: "ok" });
       return toolResult("remember", { saved_to: file, note }, { summary: "saved to auto memory" });
     }

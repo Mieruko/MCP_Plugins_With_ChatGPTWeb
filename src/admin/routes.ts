@@ -14,6 +14,7 @@ import {
 } from "../lib/mcp-upstream-config.js";
 import { getDefaultCwd, getFullDiskAccess } from "../lib/path-security.js";
 import { getCheckpointConfig } from "../lib/checkpoint.js";
+import { getOAuthProvider } from "../lib/oauth-provider.js";
 import {
   getRecentActivity,
   loadAuditHistory,
@@ -78,6 +79,17 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
     const upstream = await manager.listStatuses();
     const profile = getChatGptToolProfile();
     const sessions = options.sessionList?.() ?? [];
+    const chatGptSessions = sessions.filter(session => session.clientType === "chatgpt");
+    const activeChatGptSessions = chatGptSessions.filter(session => session.active);
+    const pendingChatGptConnections = (getOAuthProvider()?.listPending() || []).filter(connection => connection.chatgpt);
+    const lastSeenAt = chatGptSessions
+      .map(session => session.lastAccessedAt)
+      .sort((a, b) => b.localeCompare(a))[0] || null;
+    const chatGptStatus = activeChatGptSessions.length
+      ? "connected"
+      : pendingChatGptConnections.length
+        ? "approval_required"
+        : "not_connected";
     res.json({
       status: "ok",
       name: "codex-mcp-admin",
@@ -86,9 +98,18 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
       active_sessions: options.sessionCount(),
       recoverable_sessions: sessions.length,
       sessions,
+      chatgpt: {
+        status: chatGptStatus,
+        connected: activeChatGptSessions.length > 0,
+        active_sessions: activeChatGptSessions.length,
+        recoverable_sessions: chatGptSessions.length,
+        pending_approvals: pendingChatGptConnections.length,
+        last_seen_at: lastSeenAt,
+      },
       tool_profile: profile,
       core_tools: [...SLIM_CHATGPT_TOOLS],
       public_base_url: process.env.PUBLIC_BASE_URL || null,
+      connection_mode: process.env.LOCAL_CODER_CONNECTION_MODE || "local",
       default_cwd: getDefaultCwd(),
       full_disk_access: getFullDiskAccess(),
       upstream,

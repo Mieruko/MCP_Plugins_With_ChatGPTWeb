@@ -6,7 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
-import { resolveSessionTask, getWorkbench, taskExecutionPath } from "./workbench.js";
+import { resolveSessionTask, getWorkbench, markAgentSessionClosed, taskExecutionPath } from "./workbench.js";
 import { executionContext } from "./workbench-context.js";
 import { buildInstructionContext } from "./instruction-context.js";
 
@@ -35,6 +35,7 @@ export interface McpSession {
   taskId: string;
   workspace: string;
   clientInfo?: { name: string; version?: string };
+  clientType: "chatgpt" | "mcp";
   lastAccessedAt: number;
   createdAt: number;
   liveConnections: number;
@@ -47,6 +48,7 @@ export interface McpSessionSummary {
   taskId: string;
   workspace: string;
   clientInfo?: { name: string; version?: string };
+  clientType: "chatgpt" | "mcp";
   createdAt: string;
   lastAccessedAt: string;
   active: boolean;
@@ -101,6 +103,14 @@ function extractClientInfo(body: unknown): { name: string; version?: string } | 
   const version = (info as { version?: unknown }).version;
   if (typeof name !== "string" || !name.trim()) return undefined;
   return { name: name.trim().slice(0, 120), ...(typeof version === "string" ? { version: version.slice(0, 80) } : {}) };
+}
+
+function clientInfoLooksLikeChatGpt(clientInfo?: { name: string; version?: string }): boolean {
+  return /chatgpt|openai/i.test(clientInfo?.name || "");
+}
+
+function requestClientType(res: Response, clientInfo?: { name: string; version?: string }): McpSession["clientType"] {
+  return res.locals?.mcpAuth?.chatgpt === true || clientInfoLooksLikeChatGpt(clientInfo) ? "chatgpt" : "mcp";
 }
 
 function isSessionActive(session: McpSession, now = Date.now()): boolean {
@@ -247,6 +257,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     delete sessions[sessionId];
     delete lastTransportErrors[sessionId];
     sessionOpChains.delete(sessionId);
+    void markAgentSessionClosed(sessionId).catch(error => console.warn(`[MCP] Failed to persist closed agent binding ${sessionId}: ${String(error)}`));
     console.log(`[MCP] Session removed (${reason}): ${sessionId}`);
   }
 
@@ -254,9 +265,9 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     delete pendingRecoveries[sessionId];
   }
 
-  async function buildSession(preferredSessionId?: string, clientInfo?: { name: string; version?: string }): Promise<McpSession> {
+  async function buildSession(preferredSessionId?: string, clientInfo?: { name: string; version?: string }, clientType: McpSession["clientType"] = "mcp"): Promise<McpSession> {
     const sessionId = preferredSessionId || randomUUID();
-    const taskId = await resolveSessionTask(sessionId, config.workspaceRoot);
+    const taskId = await resolveSessionTask(sessionId, config.workspaceRoot, clientType);
     const task = (await getWorkbench()).tasks.find(t => t.id === taskId)!;
     const executionRoot = taskExecutionPath(task);
     // Bind both initialization memory and tools to the same task. Never send the
@@ -274,7 +285,15 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       getUpstreamManager(),
       context.instructionsText,
       taskId,
-      sessionId
+      sessionId,
+      clientType,
+      (nextTaskId, nextWorkspace) => {
+        const current = sessions[sessionId];
+        if (!current) return;
+        current.taskId = nextTaskId;
+        current.workspace = nextWorkspace;
+        current.lastAccessedAt = Date.now();
+      },
     );
 
     const transport = new StreamableHTTPServerTransport({
@@ -289,6 +308,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
           taskId,
           workspace: executionRoot,
           clientInfo: pending?.clientInfo ?? existing?.clientInfo ?? clientInfo,
+          clientType: pending?.clientType ?? existing?.clientType ?? clientType,
           lastAccessedAt: Date.now(),
           createdAt: existing?.createdAt ?? Date.now(),
           liveConnections: existing?.liveConnections ?? 0,
@@ -329,6 +349,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         taskId,
         workspace: executionRoot,
         clientInfo,
+        clientType,
         lastAccessedAt: Date.now(),
         createdAt: Date.now(),
         liveConnections: 0,
@@ -403,6 +424,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
           taskId: session.taskId,
           workspace: session.workspace,
           clientInfo: session.clientInfo,
+          clientType: session.clientType,
           createdAt: new Date(session.createdAt).toISOString(),
           lastAccessedAt: new Date(session.lastAccessedAt).toISOString(),
           active: isSessionActive(session, now),
@@ -436,15 +458,18 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
     async createNew(req: Request, res: Response, body: unknown): Promise<void> {
       const headerSessionId = req.headers["mcp-session-id"] as string | undefined;
+      const clientInfo = extractClientInfo(body);
+      const clientType = requestClientType(res, clientInfo);
       let session: McpSession;
 
       if (headerSessionId && pendingRecoveries[headerSessionId]) {
         session = pendingRecoveries[headerSessionId];
-        session.clientInfo = extractClientInfo(body) ?? session.clientInfo;
+        session.clientInfo = clientInfo ?? session.clientInfo;
+        if (clientType === "chatgpt") session.clientType = "chatgpt";
         clearPendingRecovery(headerSessionId);
         console.log(`[MCP] Using pending recovery transport for ${headerSessionId}`);
       } else {
-        session = await buildSession(undefined, extractClientInfo(body));
+        session = await buildSession(undefined, clientInfo, clientType);
       }
 
       const sid = headerSessionId || session.transport.sessionId;
@@ -520,7 +545,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         DEFAULT_PROTOCOL_VERSION;
       const mcpPath = req.path || "/mcp";
 
-      const pending = await buildSession(staleSessionId);
+      const pending = await buildSession(staleSessionId, undefined, requestClientType(res));
       pendingRecoveries[staleSessionId] = pending;
 
       const warmed = await warmUpRecoveredSession(staleSessionId, mcpPath, protocolVersion);

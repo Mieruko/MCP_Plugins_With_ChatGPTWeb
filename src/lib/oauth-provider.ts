@@ -45,6 +45,14 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return configured.includes(uri) || /^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(uri)
       || uri === "https://chatgpt.com/connector_platform_oauth_redirect";
   }
+  private isChatGptRedirect(uri: string): boolean {
+    return /^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(uri)
+      || uri === "https://chatgpt.com/connector_platform_oauth_redirect";
+  }
+  isChatGptClient(clientId: string): boolean {
+    const client = this.clients.get(clientId);
+    return Boolean(client?.redirect_uris?.some(uri => this.isChatGptRedirect(uri)));
+  }
   clientsStore = {
     getClient: async (id: string) => this.clients.get(id),
     registerClient: async (input: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">): Promise<OAuthClientInformationFull> => {
@@ -72,7 +80,8 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
   listPending() {
     return [...this.pending.values()].filter(p => p.expires > Date.now() && p.decision === undefined).map(p => ({ id: p.id,
-      clientName: p.client.client_name || "OAuth client", redirectUri: p.params.redirectUri, expiresAt: p.expires }));
+      clientName: p.client.client_name || "OAuth client", redirectUri: p.params.redirectUri, expiresAt: p.expires,
+      chatgpt: this.isChatGptRedirect(p.params.redirectUri) }));
   }
   decide(id: string, approve: boolean) {
     const p = this.pending.get(id);

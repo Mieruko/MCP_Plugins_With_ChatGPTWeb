@@ -32,6 +32,12 @@ await fs.writeFile(path.join(tmp, 'b.ts'), 'export const third = 3;\n');
 await fs.writeFile(path.join(tmp, 'large.ts'), 'x'.repeat(9000));
 await fs.writeFile(path.join(tmp, 'binary.bin'), Buffer.from([0, 1, 2]));
 await fs.writeFile(path.join(tmp, 'upstream.json'), '{"version":1,"servers":[]}');
+const conversationalTarget = path.join(tmp, 'target-project');
+await fs.mkdir(conversationalTarget);
+await fs.writeFile(path.join(conversationalTarget, 'marker.txt'), 'CONVERSATIONAL_TARGET_OK\n');
+const conversationalCreated = path.join(tmp, 'created-project');
+await fs.mkdir(conversationalCreated);
+await fs.writeFile(path.join(conversationalCreated, 'created.txt'), 'CREATE_WORKSPACE_OK\n');
 const port = await freePort();
 let adminPort = await freePort();
 while (adminPort === port) adminPort = await freePort();
@@ -39,6 +45,7 @@ const server = spawn(process.execPath, [path.join(root, 'dist/index.js')], {
   cwd: tmp, windowsHide: true,
   env: { ...process.env, PORT: String(port), ADMIN_PORT: String(adminPort), ADMIN_TOKEN: 'test-admin', MCP_AUTH_TOKEN: 'test-mcp',
     WORKBENCH_PATH: path.join(tmp, 'control-state'), WORKBENCH_DEFAULT_MODE: 'full',
+    WORKBENCH_EXPERIENCE: 'advanced',
     WORKSPACE_PATH: tmp, WORKSPACE_PATHS: '', EXTRA_WORKSPACE_PATHS: '', ALLOWED_WORKSPACE_PATHS: '',
     MCP_UPSTREAM_CONFIG: path.join(tmp, 'upstream.json'), AUDIT_LOG_PATH: path.join(tmp, 'audit.log'),
     CHECKPOINT_PATH: path.join(tmp, 'checkpoints'), CODEX_HOME: path.join(tmp, 'codex'),
@@ -146,8 +153,49 @@ try {
   assert.equal(failed.data.exit_code, 7);
   console.log('OK background wait, completion, exit failure and no duplicate output');
 
-  const recovered = await tool('00000000-0000-4000-8000-000000000077', 'inspect_code', { requests: [{ kind: 'read', path: 'b.ts' }] });
+  const beforeControl = await tool(sid, 'workbench_control', { action: 'status' });
+  const createdWorkspace = await tool(sid, 'workbench_control', {
+    action: 'create_workspace', workspace_path: conversationalCreated, workspace_name: 'Created from chat',
+  });
+  assert.equal(createdWorkspace.created, true);
+  assert.equal(createdWorkspace.current_chat_unchanged, true);
+  assert.equal(path.resolve(createdWorkspace.workspace.path), path.resolve(conversationalCreated));
+  const createdTask = await tool(sid, 'workbench_control', {
+    action: 'create_task', workspace_path: conversationalCreated, task_title: 'Created without binding',
+  });
+  assert.equal(createdTask.created, true);
+  assert.equal(createdTask.current_chat_unchanged, true);
+  assert.equal((await tool(sid, 'workbench_control', { action: 'status' })).task.id, beforeControl.task.id);
+  console.log('OK conversational workspace/task creation does not silently rebind the current chat');
+
+  const targeted = await tool(sid, 'workbench_control', {
+    action: 'target', workspace_path: conversationalTarget, workspace_name: 'Conversational target',
+    task_title: 'Chat-created task', create_missing: true,
+  });
+  assert.equal(targeted.authoritative, true);
+  assert.equal(path.resolve(targeted.workspace.path), path.resolve(conversationalTarget));
+  assert.equal(targeted.task.title, 'Chat-created task');
+  assert.equal(targeted.created.workspace, true);
+  assert.equal(targeted.created.task, true);
+  const targetRead = await tool(sid, 'read_text_file', { path: 'marker.txt' });
+  assert.match(targetRead.data.content, /CONVERSATIONAL_TARGET_OK/);
+  const targetStatus = await tool(sid, 'agent_status', {});
+  assert.equal(path.resolve(targetStatus.data.default_cwd), path.resolve(conversationalTarget));
+  const controlStatus = await tool(sid, 'workbench_control', { action: 'status' });
+  assert.equal(controlStatus.task.id, targeted.task.id);
+  assert.equal(path.resolve(controlStatus.task.execution_path), path.resolve(conversationalTarget));
+  const adminStateResponse = await fetch(`http://127.0.0.1:${adminPort}/api/workbench`, {
+    headers: { Authorization: 'Bearer test-admin' }, signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(adminStateResponse.status, 200);
+  const adminState = (await adminStateResponse.json()).data;
+  assert.equal(adminState.selectedTaskId, targeted.task.id);
+  assert.equal(adminState.agentBindings.find(binding => binding.sessionId === sid)?.taskId, targeted.task.id);
+  console.log('OK conversational Workbench target retargets the same MCP session and selected task');
+
+  const recovered = await tool('00000000-0000-4000-8000-000000000077', 'inspect_code', { requests: [{ kind: 'read', path: 'marker.txt' }] });
   assert.equal(recovered.ok, true);
+  assert.match(recovered.data.results[0].content, /CONVERSATIONAL_TARGET_OK/);
   console.log('OK stale session recovery');
 } catch (error) {
   console.error(serverLog);

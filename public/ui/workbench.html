@@ -18,11 +18,11 @@
       <button id="context-button" class="context-card" type="button" aria-haspopup="dialog">
         <span class="context-icon">▣</span>
         <span class="context-copy">
-          <small>Workspace</small>
+          <small id="context-project-label">Project</small>
           <span class="context-title-line">
             <strong id="workspace-name">Chưa kết nối</strong>
-            <span class="context-separator">/</span>
-            <strong id="task-name" class="context-task-name">No task</strong>
+            <span class="context-separator advanced-only">/</span>
+            <strong id="task-name" class="context-task-name advanced-only">No task</strong>
           </span>
           <span id="workspace-path">—</span>
         </span>
@@ -32,13 +32,28 @@
         </span>
       </button>
 
-      <button id="policy-button" class="policy-button" type="button">Ask</button>
+      <div class="mode-controls">
+        <button id="experience-button" class="experience-button" type="button" aria-haspopup="dialog" disabled>Experience</button>
+        <button id="policy-button" class="policy-button" type="button">Ask</button>
+      </div>
 
       <button id="mcp-button" class="mcp-state mcp-link" type="button" title="Open MCP settings">
         <span>MCP</span><i id="mcp-dot" class="dot muted-dot"></i><strong id="mcp-state">Offline</strong>
       </button>
 
-      <button id="review-button" class="review-button" type="button" disabled>Review 0 changes</button>
+      <button id="chatgpt-button" class="mcp-state chatgpt-state mcp-link" type="button" title="ChatGPT connection status">
+        <span>ChatGPT</span><i id="chatgpt-dot" class="dot muted-dot"></i><strong id="chatgpt-state">Not connected</strong>
+      </button>
+
+      <button id="chat-sessions-button" class="chat-sessions-button advanced-only" type="button" title="Open multi-chat workspace">
+        <span>Chats</span><strong id="chat-sessions-count">0</strong>
+      </button>
+
+      <button id="review-button" class="review-button" type="button" disabled>
+        <span>Review changes</span>
+        <strong id="review-change-count" class="review-button-count">0</strong>
+        <b id="review-attention-count" class="review-button-attention" hidden>0</b>
+      </button>
       <button id="settings-button" class="icon-button" type="button" title="Settings" aria-label="Settings">⚙</button>
     </header>
 
@@ -50,61 +65,83 @@
             <button id="environment-refresh" class="icon-button small" type="button" title="Refresh environment">↻</button>
           </div>
           <div class="environment-card">
-            <button id="environment-branch" class="environment-context-button" type="button" disabled>
+            <div class="environment-summary">
               <span class="environment-context-icon">⑂</span>
               <span class="environment-context-copy">
-                <small id="environment-mode">Local</small>
+                <span class="environment-context-kicker">
+                  <small id="environment-mode">Local</small>
+                  <i id="environment-status" class="environment-status">Ready</i>
+                </span>
                 <strong id="environment-branch-name">Source control unavailable</strong>
-                <span id="environment-path">—</span>
+                <span id="environment-path" class="environment-path">—</span>
               </span>
-              <span class="environment-context-action">Branch ›</span>
+              <button id="environment-branch" class="environment-branch-button" type="button" disabled>Branch <b>›</b></button>
+            </div>
+            <div class="environment-stats">
+              <button id="environment-changes" class="environment-stat" type="button" disabled>
+                <small>Working tree</small>
+                <strong><span id="environment-change-count">0</span> <span id="environment-change-label">changes</span></strong>
+                <span id="environment-change-meta">Clean working tree</span>
+              </button>
+              <div class="environment-stat environment-sync">
+                <small>Sync</small>
+                <strong id="environment-sync-state">Up to date</strong>
+                <span id="environment-sync-meta">—</span>
+              </div>
+            </div>
+            <button id="environment-primary-action" class="environment-primary-action" type="button" disabled>
+              <span id="environment-primary-label">Up to date</span><b>→</b>
             </button>
-            <div class="environment-actions">
-              <button id="environment-changes" class="environment-action" type="button">
-                <span>Changes</span><strong id="environment-change-count">0</strong>
-              </button>
-              <button id="environment-primary-action" class="environment-action environment-primary" type="button" disabled>
-                <span id="environment-primary-label">Commit or push</span><small id="environment-sync-meta"></small>
-              </button>
-            </div>
           </div>
         </section>
 
-        <section class="rail-section explorer-section">
-          <div class="section-head">
-            <strong>EXPLORER</strong>
-            <div class="section-actions">
-              <button id="search-toggle" class="icon-button small" type="button" title="Search">⌕</button>
-              <button id="tree-refresh" class="icon-button small" type="button" title="Refresh explorer">↻</button>
+        <section class="rail-section task-brief-section advanced-only">
+          <div class="section-head"><strong>TASK BRIEF</strong><button id="task-brief-edit" class="icon-button small" type="button" title="Edit task description">✎</button></div>
+          <div class="task-brief-body">
+            <p id="task-description" class="task-description">Add a description so every agent starts with the same scope.</p>
+            <div id="task-handoff-card" class="task-handoff-card" hidden>
+              <div class="task-handoff-head"><strong>Latest handoff</strong><small id="task-handoff-time">—</small></div>
+              <p id="task-handoff-summary"></p>
+              <ul id="task-handoff-next"></ul>
             </div>
-          </div>
-
-          <div id="search-panel" class="search-panel">
-            <input id="search-query" type="search" placeholder="Search workspace…" autocomplete="off">
-            <div id="search-results" class="search-results"></div>
-          </div>
-
-          <div class="explorer-root">
-            <span class="folder-icon">▾</span>
-            <strong id="explorer-root-name">Workspace</strong>
-            <span id="tree-path" class="tree-path">Project tree</span>
-            <button id="tree-collapse" class="tree-collapse" type="button" title="Collapse all folders">Collapse</button>
-          </div>
-          <div id="file-tree" class="file-tree" aria-live="polite">
-            <p class="empty-copy">Kết nối để đọc workspace.</p>
+            <button id="task-handoff-edit" class="secondary-button compact-action" type="button">Create handoff</button>
           </div>
         </section>
 
-        <section class="rail-section agents-section">
+        <section class="rail-section writer-section basic-only" aria-label="ChatGPT write control">
+          <div class="section-head"><strong>CHATGPT WRITE CONTROL</strong></div>
+          <div class="writer-body">
+            <strong id="writer-summary">Ready for ChatGPT</strong>
+            <p id="writer-description">The first conversation that changes this project takes write control.</p>
+            <details class="writer-controls">
+              <summary>Choose conversation</summary>
+              <label class="field-label" for="writer-session">Conversation</label>
+              <select id="writer-session"><option value="">Connect a ChatGPT conversation</option></select>
+              <button id="writer-take-control" class="secondary-button" type="button" disabled>Give write control</button>
+            </details>
+            <p id="writer-runtime-note" class="form-help" hidden>Stop running processes and previews before transferring control. Their logs and Stop button are below the editor.</p>
+            <p id="writer-error" class="error-copy" role="alert" hidden></p>
+          </div>
+        </section>
+
+        <section class="rail-section agents-section advanced-only">
           <div class="section-head agents-head">
-            <strong><span class="live-dot"></span>ACTIVE AGENTS</strong>
-            <span id="agent-count" class="count-pill">0 active</span>
+            <strong><span class="live-dot"></span>AGENT COORDINATOR</strong>
+            <div class="agent-head-actions">
+              <button id="integration-button" class="agent-integrate-button" type="button" title="Open Integration Queue">Integrate <span id="integration-count">0</span></button>
+              <span id="agent-count" class="count-pill">0 active</span>
+            </div>
+          </div>
+          <div class="agent-coordinator-summary" aria-label="Agent coordinator summary">
+            <span><b id="agent-active-count">0</b> active</span>
+            <span><b id="agent-waiting-count">0</b> waiting</span>
+            <span id="agent-conflict-summary"><b id="agent-conflict-count">0</b> conflicts</span>
           </div>
           <div class="agent-columns" aria-hidden="true">
-            <span>Agent</span><span>Status</span><span>Task</span><span>Branch</span>
+            <span>Agent / task</span><span>Status</span><span>Branch</span><span>Changes</span>
           </div>
           <div id="agent-list" class="agent-list">
-            <p class="empty-copy">Chưa có MCP session đang hoạt động.</p>
+            <p class="empty-copy">No ChatGPT agents or queued tasks.</p>
           </div>
         </section>
       </aside>
@@ -127,7 +164,7 @@
         <div id="editor-empty" class="editor-empty">
           <div class="empty-mark">◇</div>
           <strong>Chọn một file hoặc change để bắt đầu</strong>
-          <span>Explorer mở file. Changes mở diff ngay trong vùng này.</span>
+          <span>Review và Activity mở file hoặc diff ngay trong vùng này.</span>
         </div>
         <div id="code-view" class="code-view" hidden></div>
         <div id="diff-view" class="diff-view" hidden></div>
@@ -178,7 +215,7 @@
               <div class="workspace-review-identity">
                 <span class="workspace-review-mark" aria-hidden="true">+</span>
                 <div class="workspace-review-copy">
-                  <small>WORKSPACE REVIEW</small>
+                  <small id="workspace-review-kicker">WORKSPACE REVIEW</small>
                   <strong id="workspace-review-title">Edited 0 files</strong>
                   <span class="workspace-review-subtitle">
                     <span>Review changes</span>
@@ -200,7 +237,7 @@
             <button class="filter-chip" data-filter="unstaged" type="button">Modified <span id="filter-modified-count">0</span></button>
             <button class="filter-chip" data-filter="staged" type="button">Staged <span id="filter-staged-count">0</span></button>
             <button class="filter-chip" data-filter="untracked" type="button">Added <span id="filter-added-count">0</span></button>
-            <label class="agent-change-filter">Agent
+            <label class="agent-change-filter advanced-only">Agent
               <select id="agent-change-filter" aria-label="Filter changes by agent"><option value="all">All agents</option></select>
             </label>
           </div>
@@ -224,41 +261,74 @@
           </div>
           <div class="history-group-head"><strong>CHECKPOINTS</strong><span id="checkpoint-count">0</span></div>
           <div id="checkpoint-list" class="history-list"><p class="empty-copy">Chưa có checkpoint.</p></div>
-          <div class="history-group-head"><strong>OPERATIONS</strong><span>Undo / Redo</span></div>
+          <div class="history-group-head"><strong id="history-operations-label">OPERATIONS</strong><span>Undo / Redo</span></div>
           <div id="operation-history" class="history-list"><p class="empty-copy">Chưa có operation.</p></div>
         </section>
       </aside>
     </main>
 
+    <aside id="review-center" class="review-center" aria-hidden="true" hidden>
+      <div class="review-center-head">
+        <div>
+          <small id="review-center-kicker">WORKSPACE REVIEW</small>
+          <strong id="review-center-heading">Review Center</strong>
+          <span id="review-center-scope">Current workspace</span>
+        </div>
+        <button id="review-center-close" class="icon-button" type="button" title="Close Review Center" aria-label="Close Review Center">×</button>
+      </div>
+
+      <div class="review-center-summary">
+        <div><small>CHANGES</small><strong id="review-center-change-count">0</strong><span id="review-center-branch">Working tree</span></div>
+        <div><small>STAGED</small><strong id="review-center-staged-count">0</strong><span>ready to commit</span></div>
+        <div><small>ATTENTION</small><strong id="review-center-attention-count">0</strong><span>approval requests</span></div>
+      </div>
+
+      <div class="review-center-scroll">
+        <section id="review-center-attention-section" class="review-center-section" hidden>
+          <div class="review-center-section-head"><strong>NEEDS ATTENTION</strong><span id="review-center-attention-meta">0</span></div>
+          <div id="review-center-attention-list" class="review-center-list"></div>
+        </section>
+
+        <section class="review-center-section review-center-changes-section">
+          <div class="review-center-section-head"><strong>CHANGES</strong><span id="review-center-reviewed-meta">0 reviewed</span></div>
+          <div class="review-center-filters">
+            <button class="review-center-filter active" data-review-filter="all" type="button">All <span id="review-center-filter-all">0</span></button>
+            <button class="review-center-filter" data-review-filter="unstaged" type="button">Modified <span id="review-center-filter-modified">0</span></button>
+            <button class="review-center-filter" data-review-filter="staged" type="button">Staged <span id="review-center-filter-staged">0</span></button>
+            <button class="review-center-filter" data-review-filter="untracked" type="button">Added <span id="review-center-filter-added">0</span></button>
+          </div>
+          <div class="review-center-toolbar">
+            <button id="review-center-next" class="secondary-button compact-action" type="button">Review next</button>
+            <button id="review-center-stage-reviewed" class="secondary-button compact-action" type="button">Stage reviewed</button>
+          </div>
+          <div id="review-center-changes-list" class="review-center-list"><p class="empty-copy">Working tree clean.</p></div>
+        </section>
+
+        <section id="review-center-recent-section" class="review-center-section" hidden>
+          <div class="review-center-section-head"><strong id="review-center-recent-heading">RECENT AGENT WORK</strong><span id="review-center-recent-meta">Latest change set</span></div>
+          <div id="review-center-recent-work" class="review-center-list"></div>
+        </section>
+      </div>
+    </aside>
+
     <footer class="statusbar">
       <span id="status-workspace"><i class="dot"></i>Workspace ready</span>
       <span id="status-path">—</span>
-      <span id="status-agents">0 agents active</span>
+      <span id="status-agents" class="advanced-only">0 agents active</span>
       <span id="status-mcp"><i class="dot muted-dot"></i>MCP offline</span>
       <span id="status-changes">0 changes</span>
       <span id="status-message" class="status-message">Ready</span>
     </footer>
   </div>
 
-  <div id="connect-overlay" class="connect-overlay">
-    <form id="connect-form" class="connect-card">
-      <div class="connect-mark">◇</div>
-      <h1>ChatGPT Local Coder</h1>
-      <p>Nhập admin token để mở local Workbench.</p>
-      <label>Admin token<input id="token" type="password" autocomplete="current-password" placeholder="credentials.json token"></label>
-      <button id="connect" class="primary-button" type="submit">Connect</button>
-      <p id="connection-error" class="error-copy" hidden></p>
-    </form>
-  </div>
-
   <dialog id="context-dialog" class="app-dialog context-dialog">
-    <div class="dialog-head"><div><small>WORKSPACE CONTEXT</small><h2>Workspace & tasks</h2></div><button class="icon-button" data-close-dialog="context-dialog" type="button">×</button></div>
+    <div class="dialog-head"><div><small id="context-kicker">WORKSPACE CONTEXT</small><h2 id="context-heading">Workspace & tasks</h2></div><button class="icon-button" data-close-dialog="context-dialog" type="button">×</button></div>
     <div class="dialog-body context-dialog-body">
       <section class="context-workspace-summary">
         <div class="context-summary-icon">▣</div>
         <div class="context-summary-copy"><small>CURRENT WORKSPACE</small><strong id="context-workspace-name">—</strong><code id="context-workspace-path">—</code></div>
       </section>
-      <section class="context-section">
+      <section class="context-section advanced-only">
         <div class="context-section-head"><strong>TASKS IN THIS WORKSPACE</strong><button id="new-task-button" class="mini-action" type="button">+ New task</button></div>
         <div id="context-task-list" class="context-list"><p class="empty-copy">No tasks.</p></div>
       </section>
@@ -277,16 +347,34 @@
     <div class="dialog-head workspace-dialog-head">
       <div class="workspace-dialog-title">
         <div class="workspace-dialog-mark">▱</div>
-        <div><small>WORKSPACE</small><h2>Add project folder</h2><p>Open another local project in this Workbench.</p></div>
+        <div><small>WORKSPACE</small><h2 id="add-workspace-heading">Add workspace</h2><p id="add-workspace-subtitle">Open a local project folder or clone a Git repository.</p></div>
       </div>
       <button class="icon-button workspace-dialog-close" data-close-dialog="add-workspace-dialog" type="button" aria-label="Close">×</button>
     </div>
     <div class="dialog-body workspace-add-body">
+      <div id="workspace-source-tabs" class="workspace-source-tabs" role="tablist" aria-label="Workspace source">
+        <button id="workspace-source-local" class="workspace-source-tab active" type="button" role="tab" aria-selected="true">Open folder</button>
+        <button id="workspace-source-clone" class="workspace-source-tab" type="button" role="tab" aria-selected="false">Clone repository</button>
+      </div>
       <section class="workspace-picker-card">
-        <div class="workspace-field-copy"><strong>Project folder</strong><span>Choose the folder ChatGPT should work inside.</span></div>
-        <div class="folder-path-row">
-          <div class="folder-path-input"><span>⌁</span><input id="add-workspace-path" type="text" spellcheck="false" placeholder="D:\Projects\my-app"></div>
-          <button id="browse-workspace" class="workspace-browse-button" type="button">Browse folders</button>
+        <div id="workspace-local-panel" class="workspace-source-panel">
+          <div class="workspace-field-copy"><strong>Project folder</strong><span>Choose a project that already exists on this machine.</span></div>
+          <div class="folder-path-row">
+            <div class="folder-path-input"><span>⌁</span><input id="add-workspace-path" type="text" spellcheck="false" placeholder="D:\Projects\my-app"></div>
+            <button id="browse-workspace" class="workspace-browse-button" type="button">Browse folders</button>
+          </div>
+        </div>
+        <div id="workspace-clone-panel" class="workspace-source-panel" hidden>
+          <label class="field-label workspace-clone-field">Repository URL or Git path<input id="clone-workspace-repository" type="text" spellcheck="false" placeholder="https://github.com/owner/project.git"></label>
+          <div class="workspace-field-copy"><strong>Clone into</strong><span>Select the parent folder. Workbench creates the repository folder inside it.</span></div>
+          <div class="folder-path-row">
+            <div class="folder-path-input"><span>⌁</span><input id="clone-workspace-parent" type="text" spellcheck="false" placeholder="D:\Projects"></div>
+            <button id="browse-clone-parent" class="workspace-browse-button" type="button">Browse folders</button>
+          </div>
+          <div class="workspace-clone-grid">
+            <label class="field-label">Folder name<input id="clone-workspace-folder" type="text" maxlength="240" spellcheck="false" placeholder="project"></label>
+            <label class="field-label">Branch <span class="optional-label">Optional</span><input id="clone-workspace-branch" type="text" maxlength="200" spellcheck="false" placeholder="Default branch"></label>
+          </div>
         </div>
         <section id="folder-browser" class="folder-browser" hidden>
           <div class="folder-browser-head">
@@ -297,11 +385,11 @@
           <div id="folder-browser-list" class="folder-browser-list"><p class="empty-copy">Choose a drive or folder.</p></div>
         </section>
       </section>
-      <label class="workspace-name-field">
+      <label id="workspace-name-field" class="workspace-name-field">
         <span><strong>Workspace name</strong><small>Optional · shown in the Workbench switcher</small></span>
         <input id="add-workspace-name" type="text" maxlength="120" placeholder="my-app">
       </label>
-      <div class="workspace-safety-note"><span>i</span><p>This only registers the folder in Local Coder. Your project files are not moved or deleted.</p></div>
+      <div class="workspace-safety-note"><span>i</span><p id="workspace-safety-copy">This only registers the folder in Local Coder. Your project files are not moved or deleted.</p></div>
       <p id="add-workspace-error" class="error-copy workspace-add-error" hidden></p>
     </div>
     <div class="dialog-actions workspace-dialog-actions"><button class="secondary-button" data-close-dialog="add-workspace-dialog" type="button">Cancel</button><button id="create-workspace" class="primary-button" type="button">Add workspace</button></div>
@@ -311,6 +399,7 @@
     <div class="dialog-head"><div><small>NEW TASK</small><h2>What are you working on?</h2></div><button class="icon-button" data-close-dialog="new-task-dialog" type="button">×</button></div>
     <div class="dialog-body task-create-body">
       <label class="field-label">Task name<input id="new-task-title" type="text" maxlength="200" placeholder="Refactor authentication"></label>
+      <label class="field-label">Description<textarea id="new-task-description" maxlength="4000" rows="4" placeholder="Goal, scope, constraints and what success looks like…"></textarea></label>
       <section id="new-task-workspace-summary" class="task-workspace-summary">
         <small>Workspace</small>
         <strong id="new-task-workspace-name">—</strong>
@@ -320,12 +409,34 @@
       <fieldset class="permission-options environment-create-options">
         <legend>Environment</legend>
         <label class="permission-option"><input type="radio" name="task-environment" value="local" checked><span><strong>Local</strong><small>Work directly in the project checkout.</small></span></label>
-        <label class="permission-option"><input type="radio" name="task-environment" value="worktree"><span><strong>New worktree</strong><small>Create an isolated detached checkout for this task.</small></span></label>
+        <label class="permission-option"><input type="radio" name="task-environment" value="worktree"><span><strong>Parallel agent <em class="recommended-label">Recommended</em></strong><small>Create an isolated managed branch + worktree so this task can run beside other agents.</small></span></label>
       </fieldset>
       <label id="new-task-starting-ref-field" class="field-label" hidden>Starting branch or ref<input id="new-task-starting-ref" type="text" maxlength="200" placeholder="main"></label>
+      <label class="field-label toggle-row task-agent-assignment"><input id="new-task-assign-agent" type="checkbox"><span><strong>Assign next ChatGPT session</strong><small>The next new ChatGPT connection claims this task deterministically. Existing chats stay pinned to their current task.</small></span></label>
       <p class="form-help">A task is the work you are doing inside this workspace. Permissions are managed separately.</p>
       <p id="new-task-error" class="error-copy" hidden></p>
       <div class="dialog-actions"><button class="secondary-button" data-close-dialog="new-task-dialog" type="button">Cancel</button><button id="create-task" class="primary-button" type="button">Create task</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="task-description-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>TASK BRIEF</small><h2>Edit description</h2></div><button class="icon-button" data-close-dialog="task-description-dialog" type="button">×</button></div>
+    <div class="dialog-body">
+      <label class="field-label">Description<textarea id="task-description-input" maxlength="4000" rows="8" placeholder="Goal, scope, constraints and success criteria…"></textarea></label>
+      <p id="task-description-error" class="error-copy" hidden></p>
+      <div class="dialog-actions"><button class="secondary-button" data-close-dialog="task-description-dialog" type="button">Cancel</button><button id="save-task-description" class="primary-button" type="button">Save description</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="task-handoff-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>HANDOFF</small><h2>Pass this task to another agent</h2></div><button class="icon-button" data-close-dialog="task-handoff-dialog" type="button">×</button></div>
+    <div class="dialog-body">
+      <label class="field-label">Current state<textarea id="task-handoff-summary-input" maxlength="6000" rows="5" placeholder="What has been done, what works, and what is currently blocked…"></textarea></label>
+      <label class="field-label">Next steps<textarea id="task-handoff-next-input" maxlength="6000" rows="5" placeholder="One step per line"></textarea></label>
+      <label class="field-label">Notes<textarea id="task-handoff-notes-input" maxlength="6000" rows="4" placeholder="Decisions, caveats, files to inspect, test commands…"></textarea></label>
+      <p class="form-help">The next ChatGPT session assigned to this task can read this handoff through Workbench.</p>
+      <p id="task-handoff-error" class="error-copy" hidden></p>
+      <div class="dialog-actions"><button class="secondary-button" data-close-dialog="task-handoff-dialog" type="button">Cancel</button><button id="save-task-handoff" class="primary-button" type="button">Save handoff</button></div>
     </div>
   </dialog>
 
@@ -345,8 +456,8 @@
       <fieldset class="permission-options">
         <legend>Permission mode</legend>
         <label class="permission-option"><input type="radio" name="policy-mode" value="ask"><span><strong>Ask before changes</strong><small>Review write and command actions before they run.</small></span></label>
-        <label class="permission-option"><input type="radio" name="policy-mode" value="auto"><span><strong>Auto</strong><small>Allow safe edits automatically and ask for higher-risk actions.</small></span></label>
-        <label class="permission-option"><input type="radio" name="policy-mode" value="full"><span><strong>Full access</strong><small>Allow this task to edit files and run commands without approval prompts.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="auto"><span><strong id="policy-auto-label">Allow safe edits</strong><small>Allow supported file edits automatically; commands and Git changes still ask.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="full"><span><strong id="policy-full-label">No approval prompts</strong><small>Allow changes and commands within the access scope selected below.</small></span></label>
       </fieldset>
       <label class="toggle-row human-toggle"><input id="policy-scope" type="checkbox" checked><span><strong>Restrict access to this workspace</strong><small id="policy-scope-help">ChatGPT can only access files inside this workspace.</small></span></label>
       <div class="dialog-actions"><button class="secondary-button" data-close-dialog="permissions-dialog" type="button">Cancel</button><button id="save-policy" class="primary-button" type="button">Save permissions</button></div>
@@ -356,19 +467,56 @@
   <dialog id="workspace-settings-dialog" class="app-dialog compact-dialog">
     <div class="dialog-head"><div><small>WORKSPACE</small><h2>Workspace settings</h2></div><button class="icon-button" data-close-dialog="workspace-settings-dialog" type="button">×</button></div>
     <div class="dialog-body workspace-settings-body">
-      <section class="workspace-settings-summary"><small>Workspace</small><strong id="settings-workspace-name">—</strong><code id="settings-workspace-path">—</code></section>
+      <section class="workspace-settings-summary"><small>Workspace</small><strong id="settings-workspace-name">—</strong><code id="settings-workspace-path">—</code><span id="settings-workspace-availability" class="workspace-availability ready">Ready</span></section>
+      <button id="workspace-settings-locate" class="settings-row-button" type="button"><span><strong>Project folder</strong><small id="workspace-settings-locate-copy">Change the folder this workspace points to. Files are not moved.</small></span><span>Locate</span></button>
+      <button id="workspace-settings-experience" class="settings-row-button" type="button"><span><strong>Experience</strong><small id="settings-experience-summary">Basic or Advanced</small></span><span>›</span></button>
       <button id="workspace-settings-permissions" class="settings-row-button" type="button"><span><strong>Permissions</strong><small id="settings-permission-summary">—</small></span><span>›</span></button>
-      <button id="workspace-settings-mcp" class="settings-row-button" type="button"><span><strong>MCP</strong><small id="settings-mcp-summary">Connection and server settings</small></span><span>›</span></button>
+      <button id="workspace-settings-mcp" class="settings-row-button" type="button"><span><strong>Connections</strong><small id="settings-mcp-summary">ChatGPT, local MCP and upstream servers</small></span><span>›</span></button>
       <button id="workspace-settings-system" class="settings-row-button" type="button"><span><strong>System</strong><small>Environment, project context and diagnostics</small></span><span>›</span></button>
+      <section class="workspace-danger-zone">
+        <div><strong>Remove workspace</strong><small>Remove this project, its tasks and Workbench history. Project files stay on disk.</small></div>
+        <button id="workspace-settings-remove" class="danger-button" type="button">Remove</button>
+      </section>
+      <p id="workspace-remove-error" class="error-copy workspace-remove-error" hidden></p>
     </div>
   </dialog>
 
-  <dialog id="mcp-dialog" class="app-dialog context-dialog">
-    <div class="dialog-head"><div><small>LOCAL CODER</small><h2>MCP settings</h2></div><button class="icon-button" data-close-dialog="mcp-dialog" type="button">×</button></div>
+  <dialog id="experience-dialog" class="app-dialog compact-dialog">
+    <div class="dialog-head"><div><small>PROJECT</small><h2>Choose your experience</h2></div><button class="icon-button" data-close-dialog="experience-dialog" type="button" aria-label="Close">×</button></div>
+    <div class="dialog-body experience-body">
+      <fieldset class="permission-options">
+        <legend>Experience</legend>
+        <label class="permission-option"><input type="radio" name="experience" value="basic"><span><strong>Basic · Recommended</strong><small>Start here for everyday coding. ChatGPT works on your project; review changes, approve requests and undo recent work.</small></span></label>
+        <label class="permission-option"><input type="radio" name="experience" value="advanced"><span><strong>Advanced</strong><small>Coordinate multiple tasks and conversations with separate worktrees, previews and a merge queue.</small></span></label>
+      </fieldset>
+      <p class="form-help">Your files, history, conversations and permissions are preserved. Both experiences use the same coding tools.</p>
+      <section id="experience-blocked" hidden><strong>Advanced work is still active</strong><ul id="experience-blockers"></ul><button id="experience-open-tasks" class="secondary-button" type="button">Open tasks</button></section>
+      <p id="experience-error" class="error-copy" role="alert" hidden></p>
+      <div class="dialog-actions"><button class="secondary-button" data-close-dialog="experience-dialog" type="button">Cancel</button><button id="experience-apply" class="primary-button" type="button">Apply experience</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="mcp-dialog" class="app-dialog context-dialog connections-dialog">
+    <div class="dialog-head"><div><small>LOCAL CODER</small><h2>Connections</h2></div><button class="icon-button" data-close-dialog="mcp-dialog" type="button">×</button></div>
     <div class="dialog-body mcp-settings-body">
-      <section class="mcp-summary-grid">
-        <div class="mcp-summary-card"><small>MCP server</small><strong id="mcp-dialog-server">—</strong><span id="mcp-dialog-sessions">—</span></div>
-        <div class="mcp-summary-card"><small>Public connection</small><strong id="mcp-dialog-public">Local only</strong><span id="mcp-dialog-profile">—</span></div>
+      <section class="connection-status-grid" aria-label="Connection status">
+        <article class="connection-status-card">
+          <div class="connection-status-head">
+            <div><small>LOCAL MCP</small><strong><i class="dot"></i><span id="mcp-dialog-local-status">Ready</span></strong></div>
+            <span class="connection-badge">Local</span>
+          </div>
+          <code id="mcp-dialog-server">—</code>
+          <span id="mcp-dialog-sessions">—</span>
+        </article>
+        <article id="chatgpt-connection-card" class="connection-status-card">
+          <div class="connection-status-head">
+            <div><small>CHATGPT</small><strong><i id="mcp-dialog-chatgpt-dot" class="dot muted-dot"></i><span id="mcp-dialog-chatgpt-status">Not connected</span></strong></div>
+            <span id="mcp-dialog-connection-mode" class="connection-badge">Local only</span>
+          </div>
+          <span id="mcp-dialog-chatgpt-detail">Waiting for ChatGPT connection.</span>
+          <code id="mcp-dialog-public-url" hidden>—</code>
+          <button id="mcp-review-connection" class="secondary-button compact-action connection-review-action" type="button" hidden>Review request</button>
+        </article>
       </section>
       <section class="context-section">
         <div class="context-section-head"><strong>UPSTREAM MCP SERVERS</strong><span id="mcp-upstream-count">0</span></div>
@@ -378,13 +526,10 @@
         </div>
         <div id="mcp-upstream-list" class="mcp-upstream-list"><p class="empty-copy">No upstream servers configured.</p></div>
       </section>
-      <section class="context-section">
-        <div class="context-section-head"><strong>PROJECT CONTEXT</strong></div>
-        <div class="mcp-detail-row"><span>Workspace</span><code id="mcp-dialog-workspace">—</code></div>
-        <div class="mcp-detail-row"><span>Instructions</span><strong id="mcp-dialog-instructions">—</strong></div>
-      </section>
-      <p class="form-help">MCP status, upstream servers and import are managed directly in Workbench.</p>
-      <div class="context-footer-actions"><button id="refresh-mcp-settings" class="secondary-button" type="button">Refresh</button><button id="mcp-open-system" class="secondary-button" type="button">System settings</button></div>
+      <div class="connections-footer">
+        <span>Advanced runtime details are available in System settings.</span>
+        <div class="context-footer-actions"><button id="refresh-mcp-settings" class="secondary-button" type="button">Refresh</button><button id="mcp-open-system" class="secondary-button" type="button">System settings</button></div>
+      </div>
     </div>
   </dialog>
 
@@ -479,26 +624,102 @@
   </dialog>
 
   <dialog id="agent-dialog" class="app-dialog compact-dialog">
-    <div class="dialog-head"><div><small>ACTIVE AGENT</small><h2 id="agent-dialog-title">ChatGPT session</h2></div><button class="icon-button" data-close-dialog="agent-dialog" type="button">×</button></div>
+    <div class="dialog-head"><div><small>AGENT COORDINATOR</small><h2 id="agent-dialog-title">Agent</h2></div><button class="icon-button" data-close-dialog="agent-dialog" type="button">×</button></div>
     <div class="dialog-body">
       <div class="agent-detail-grid">
         <span>Status</span><strong id="agent-detail-status">—</strong>
         <span>Task</span><strong id="agent-detail-task">—</strong>
+        <span>Lifecycle</span><strong id="agent-detail-lifecycle">Open</strong>
         <span>Branch</span><strong id="agent-detail-branch">—</strong>
+        <span>Changes</span><strong id="agent-detail-changes">—</strong>
+        <span>Preview</span><strong id="agent-detail-preview">—</strong>
         <span>Workspace</span><code id="agent-detail-workspace">—</code>
         <span>Client</span><strong id="agent-detail-client">—</strong>
+        <span>Agent ID</span><code id="agent-detail-id">—</code>
         <span>Session</span><code id="agent-detail-session">—</code>
         <span>Last activity</span><strong id="agent-detail-last">—</strong>
       </div>
+      <section id="agent-conflicts-section" class="agent-conflicts-section" hidden>
+        <div class="history-group-head"><strong>CONFLICTS / RISKS</strong><span id="agent-conflict-detail-count">0</span></div>
+        <div id="agent-conflict-list" class="agent-conflict-list"></div>
+      </section>
       <div class="history-group-head agent-ops-head"><strong>RECENT OPERATIONS</strong><span id="agent-operation-count">0</span></div>
       <div id="agent-operation-list" class="history-list"><p class="empty-copy">Chưa có operation.</p></div>
       <div class="history-group-head agent-activity-head"><strong>RECENT ACTIVITY</strong><span id="agent-activity-count">0</span></div>
       <div id="agent-activity-list" class="agent-activity-list"><p class="empty-copy">Chưa có activity.</p></div>
     </div>
     <div class="dialog-actions">
+      <button id="agent-cancel-assignment" class="danger-button" type="button" hidden>Cancel assignment</button>
       <button id="agent-review-current" class="secondary-button" type="button" hidden>Review pending operation</button>
+      <button id="agent-open-preview" class="secondary-button" type="button" hidden>Open preview</button>
       <button id="agent-filter-changes" class="secondary-button" type="button">Show changes</button>
       <button id="agent-open-task" class="primary-button" type="button">Open task</button>
+    </div>
+  </dialog>
+
+  <dialog id="integration-dialog" class="app-dialog integration-dialog">
+    <div class="dialog-head">
+      <div><small>SOURCE CONTROL</small><h2>Integration Queue</h2><p>Review parallel task branches before bringing them back into the project branch.</p></div>
+      <button class="icon-button" data-close-dialog="integration-dialog" type="button">×</button>
+    </div>
+    <div class="dialog-body integration-dialog-body">
+      <div class="integration-summary" aria-label="Integration queue summary">
+        <span><small>OPEN</small><strong id="integration-summary-open">0</strong></span>
+        <span><small>READY</small><strong id="integration-summary-ready">0</strong></span>
+        <span><small>BLOCKED</small><strong id="integration-summary-blocked">0</strong></span>
+        <span><small>MERGED</small><strong id="integration-summary-merged">0</strong></span>
+      </div>
+      <div class="integration-safety-note"><strong>Local merge only</strong><span>Local Coder never pushes automatically.</span></div>
+      <div id="integration-list" class="integration-list"><p class="empty-copy">No managed parallel tasks in this workspace.</p></div>
+    </div>
+    <div class="dialog-actions">
+      <span class="integration-footer-copy">Clean source + clean target + conflict preflight are required.</span>
+      <button id="integration-refresh" class="secondary-button" type="button">Refresh</button>
+      <button class="primary-button" data-close-dialog="integration-dialog" type="button">Done</button>
+    </div>
+  </dialog>
+
+  <dialog id="integration-dependency-dialog" class="app-dialog compact-dialog integration-dependency-dialog">
+    <div class="dialog-head">
+      <div><small>MERGE ORDER</small><h2 id="integration-dependency-title">Dependencies</h2><p>Checked tasks must be merged before this task can merge.</p></div>
+      <button class="icon-button" data-close-dialog="integration-dependency-dialog" type="button">×</button>
+    </div>
+    <div class="dialog-body integration-dependency-body">
+      <div id="integration-dependency-list" class="integration-dependency-list"><p class="empty-copy">No other managed parallel tasks are available.</p></div>
+      <p id="integration-dependency-error" class="error-copy" hidden></p>
+    </div>
+    <div class="dialog-actions">
+      <span class="integration-footer-copy">Cycles and cross-workspace dependencies are rejected.</span>
+      <button class="secondary-button" data-close-dialog="integration-dependency-dialog" type="button">Cancel</button>
+      <button id="integration-dependency-save" class="primary-button" type="button">Save dependencies</button>
+    </div>
+  </dialog>
+
+  <dialog id="chat-sessions-dialog" class="app-dialog chat-sessions-dialog">
+    <div class="dialog-head">
+      <div><small>MULTI-CHAT WORKSPACE</small><h2>Chat Sessions</h2></div>
+      <button class="icon-button" data-close-dialog="chat-sessions-dialog" type="button">×</button>
+    </div>
+    <div class="dialog-body chat-sessions-body">
+      <section class="chat-layout-panel">
+        <div class="chat-layout-copy">
+          <small>LAYOUT</small>
+          <strong>Arrange ChatGPT Web windows</strong>
+          <span>No model API. Prompts stay local until you copy them.</span>
+        </div>
+        <div class="chat-layout-actions" aria-label="Chat window layout">
+          <button class="chat-layout-button" data-chat-layout="1" type="button" title="One window">1</button>
+          <button class="chat-layout-button" data-chat-layout="2" type="button" title="Two columns">2</button>
+          <button class="chat-layout-button" data-chat-layout="3" type="button" title="Three panes">3</button>
+          <button class="chat-layout-button" data-chat-layout="4" type="button" title="Four panes">4</button>
+        </div>
+      </section>
+      <div class="chat-live-strip">
+        <strong id="chat-session-workspace">Workspace</strong>
+        <span id="chat-session-live-summary">0 connected · 0 waiting</span>
+      </div>
+      <div id="chat-session-grid" class="chat-session-grid"></div>
+      <p id="chat-window-status" class="chat-window-status">Choose a layout or open one ChatGPT window from a card.</p>
     </div>
   </dialog>
 

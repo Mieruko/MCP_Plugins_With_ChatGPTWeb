@@ -13,6 +13,7 @@ let resizeObserver;
 const monacoModels = new Map();
 const modelListeners = new Map();
 const diffLineDecorations = { original: [], modified: [] };
+const REVIEW_PREVIEW_TAB_ID = 'review-preview';
 
 function currentTab() {
   return state.tabs.find(item => item.id === state.activeTabId);
@@ -27,7 +28,7 @@ function updateSaveState() {
     save.textContent = 'Pending';
     return;
   }
-  save.disabled = !tab || tab.type !== 'file' || !tab.dirty;
+  save.disabled = !tab || tab.type !== 'file' || tab.preview || !tab.dirty;
   save.textContent = tab?.type === 'file' && tab.dirty ? 'Save *' : 'Save';
 }
 
@@ -45,7 +46,7 @@ function upsertTab(tab) {
   const index = state.tabs.findIndex(item => item.id === tab.id);
   if (index >= 0) {
     disposeTabModels(tab.id);
-    state.tabs[index] = { ...state.tabs[index], ...tab };
+    state.tabs[index] = tab.preview ? tab : { ...state.tabs[index], ...tab };
   }
   else state.tabs.push(tab);
   state.activeTabId = tab.id;
@@ -81,10 +82,10 @@ function closeTab(id) {
 function renderTabs() {
   const target = $('editor-tabs');
   target.replaceChildren(...state.tabs.map(tab => {
-    const button = el('button', undefined, `editor-tab${tab.id === state.activeTabId ? ' active' : ''}`);
+    const button = el('button', undefined, `editor-tab${tab.id === state.activeTabId ? ' active' : ''}${tab.preview ? ' preview' : ''}`);
     button.type = 'button';
     const marker = tab.pendingOperationId ? ' [pending]' : tab.dirty ? ' *' : '';
-    button.append(el('span', `${tab.type === 'diff' ? '± ' : ''}${tab.title}${marker}`));
+    button.append(el('span', `${tab.preview ? 'Preview · ' : ''}${tab.type === 'diff' ? '± ' : ''}${tab.title}${marker}`));
     const close = el('b', '×');
     close.onclick = event => { event.stopPropagation(); closeTab(tab.id); };
     button.append(close);
@@ -350,12 +351,13 @@ async function renderActiveTab() {
   if (!tab) {
     empty.hidden = false; code.hidden = true; diff.hidden = true;
     updateDiffSyncControl(false);
-    $('editor-breadcrumb').textContent = 'Workspace'; $('editor-kind').textContent = 'FILE'; $('editor-meta').textContent = '—';
+    $('editor-breadcrumb').textContent = 'Workspace'; $('editor-breadcrumb').title = ''; $('editor-kind').textContent = 'FILE'; $('editor-meta').textContent = '—';
     updateSaveState();
     return;
   }
   empty.hidden = true;
   $('editor-breadcrumb').textContent = tab.path.replace(/\\/g, '  ›  ');
+  $('editor-breadcrumb').title = tab.path;
   const renderId = tab.id;
   let monaco;
   try { monaco = await loadMonaco(); }
@@ -408,9 +410,10 @@ async function renderActiveTab() {
       codeEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { void saveActiveEditor(); });
     }
     codeEditor.setModel(fileModel(monaco, tab));
-    codeEditor.updateOptions({ readOnly: Boolean(tab.pendingOperationId), domReadOnly: Boolean(tab.pendingOperationId) });
+    const readOnly = Boolean(tab.pendingOperationId || tab.preview);
+    codeEditor.updateOptions({ readOnly, domReadOnly: readOnly });
     codeEditor.layout();
-    $('editor-kind').textContent = tab.pendingOperationId ? 'FILE · MONACO · PENDING' : 'FILE · MONACO';
+    $('editor-kind').textContent = tab.pendingOperationId ? 'FILE · MONACO · PENDING' : tab.preview ? 'FILE · MONACO · PREVIEW' : 'FILE · MONACO';
     const meta = tab.meta || `${codeEditor.getModel()?.getLineCount() || 0} lines`;
     $('editor-meta').textContent = tab.pendingOperationId ? `${meta} · awaiting approval` : meta;
   }
@@ -421,15 +424,17 @@ const diffSyncScrollButton = $('diff-sync-scroll');
 if (diffSyncScrollButton) diffSyncScrollButton.onclick = toggleDiffScrollSync;
 
 export async function openFile(path, options = {}) {
-  const id = tabId('file', path);
+  const id = options.preview ? REVIEW_PREVIEW_TAB_ID : tabId('file', path);
   const cached = state.tabs.find(tab => tab.id === id);
-  if (cached && !options.reload) {
+  if (cached && cached.type === 'file' && cached.path === path && cached.taskId === state.taskId && !options.reload) {
     state.activeTabId = id; renderTabs(); void renderActiveTab(); return;
   }
   setStatus(`Opening ${basename(path)}…`);
-  const file = await api(`/api/workbench/tasks/${state.taskId}/file?path=${encodeURIComponent(path)}`);
+  const taskId = state.taskId;
+  const file = await api(`/api/workbench/tasks/${taskId}/file?path=${encodeURIComponent(path)}`);
+  if (taskId !== state.taskId) return;
   const content = file.content || '';
-  upsertTab({ id, type: 'file', path, title: basename(path), content, savedContent: content, dirty: false, pendingOperationId: null, sourceMeta: options.meta || '', meta: options.meta || (file.lines ? `${file.lines} lines` : 'file') });
+  upsertTab({ id, taskId, type: 'file', path, title: basename(path), content, savedContent: content, dirty: false, pendingOperationId: null, preview: Boolean(options.preview), sourceMeta: options.meta || '', meta: options.meta || (file.lines ? `${file.lines} lines` : 'file') });
   setStatus('Ready');
 }
 
@@ -441,12 +446,12 @@ export async function openGitDiff(path, staged = false, options = {}) {
   });
   const content = result?.structuredContent?.data?.output || result?.output || 'No changes';
   const baseMeta = staged ? 'index ↔ HEAD' : 'working tree ↔ index';
-  upsertTab({ id: tabId('diff', path, staged), type: 'diff', path, title: basename(path), staged, content, sourceMeta: options.meta || '', meta: options.meta ? `${baseMeta} · ${options.meta}` : baseMeta });
+  upsertTab({ id: options.preview ? REVIEW_PREVIEW_TAB_ID : tabId('diff', path, staged), type: 'diff', path, title: basename(path), staged, content, preview: Boolean(options.preview), sourceMeta: options.meta || '', meta: options.meta ? `${baseMeta} · ${options.meta}` : baseMeta });
   setStatus('Ready');
 }
 
-export function openTextDiff({ id, path, title, content, meta }) {
-  upsertTab({ id: id || tabId('diff', path), type: 'diff', path, title: title || basename(path), staged: false, content, meta });
+export function openTextDiff({ id, path, title, content, meta, preview = false }) {
+  upsertTab({ id: preview ? REVIEW_PREVIEW_TAB_ID : (id || tabId('diff', path)), type: 'diff', path, title: title || basename(path), staged: false, content, meta, preview });
 }
 
 function normalizedEditorPath(value) {
@@ -516,7 +521,11 @@ export function reconcileEditorState() {
 
 export async function saveActiveEditor() {
   const tab = currentTab();
-  if (!tab || tab.type !== 'file' || !tab.dirty || tab.pendingOperationId) return;
+  if (!tab || tab.type !== 'file' || tab.preview || !tab.dirty || tab.pendingOperationId) return;
+  if (tab.taskId && tab.taskId !== state.taskId) {
+    setStatus('This buffer belongs to another task. Return to that task before saving; your unsaved text is preserved.');
+    return;
+  }
   setStatus(`Saving ${tab.title}...`);
   const result = await api(`/api/workbench/tasks/${state.taskId}/file`, { method: 'PUT', body: { path: tab.path, content: tab.content } });
   const approval = parseApproval(result);
@@ -541,6 +550,6 @@ export async function reloadActiveEditor() {
   const tab = state.tabs.find(item => item.id === state.activeTabId);
   if (!tab) return;
   if (tab.type === 'file' && (tab.dirty || tab.pendingOperationId) && !confirm(`Reload ${tab.title} from disk and discard the editor buffer?`)) return;
-  if (tab.type === 'file') await openFile(tab.path, { reload: true, meta: tab.sourceMeta });
-  else if (tab.type === 'diff' && !tab.id.startsWith('operation:')) await openGitDiff(tab.path, tab.staged, { meta: tab.sourceMeta });
+  if (tab.type === 'file') await openFile(tab.path, { reload: true, meta: tab.sourceMeta, preview: Boolean(tab.preview) });
+  else if (tab.type === 'diff' && !tab.id.startsWith('operation:')) await openGitDiff(tab.path, tab.staged, { meta: tab.sourceMeta, preview: Boolean(tab.preview) });
 }

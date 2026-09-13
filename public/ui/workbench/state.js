@@ -1,6 +1,8 @@
 export const state = {
   data: null,
   health: null,
+  agentCoordinator: null,
+  integrationQueue: null,
   workspaceId: null,
   taskId: null,
   git: null,
@@ -11,6 +13,8 @@ export const state = {
   workspaceReview: null,
   workspaceReviewId: null,
   workspaceReviewExpanded: false,
+  reviewCenterFilter: 'all',
+  reviewedChanges: new Set(),
   connections: [],
   changeFilter: 'all',
   agentFilter: 'all',
@@ -22,11 +26,20 @@ export const state = {
   currentOperationTaskId: null,
   currentCheckpointId: null,
   currentAgentSessionId: null,
+  currentAgentId: null,
   connected: false,
 };
 
 export function currentWorkspace() {
   return state.data?.workspaces?.find(workspace => workspace.id === state.workspaceId) || null;
+}
+
+export function isBasic() {
+  return currentWorkspace()?.experience === 'basic';
+}
+
+export function currentExperience() {
+  return state.data?.experiences?.[state.workspaceId] || null;
 }
 
 export function currentTask() {
@@ -47,7 +60,8 @@ export function currentWorkspaceTasks() {
 
 export function currentWorkspaceOperations() {
   const taskIds = new Set(currentWorkspaceTasks().map(task => task.id));
-  return (state.data?.operations || []).filter(operation => taskIds.has(operation.taskId));
+  return (state.data?.operations || []).filter(operation => taskIds.has(operation.taskId)
+    && (!isBasic() || operation.taskId === currentWorkspace()?.basicTaskId));
 }
 
 export function resetTaskView() {
@@ -59,6 +73,9 @@ export function resetTaskView() {
   state.workspaceReview = null;
   state.workspaceReviewId = null;
   state.workspaceReviewExpanded = false;
+  state.integrationQueue = null;
+  state.reviewCenterFilter = 'all';
+  state.reviewedChanges = new Set();
   state.agentFilter = 'all';
   state.checkpoints = [];
   state.currentTreePath = '.';
@@ -68,4 +85,5 @@ export function resetTaskView() {
   state.currentOperationTaskId = null;
   state.currentCheckpointId = null;
   state.currentAgentSessionId = null;
+  state.currentAgentId = null;
 }

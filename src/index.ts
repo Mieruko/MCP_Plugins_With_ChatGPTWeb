@@ -27,6 +27,7 @@ import {
 import { getChatGptToolProfile } from "./lib/tool-profile.js";
 import { initializeLocalAuth, requireMcpAuth } from "./lib/local-auth.js";
 import { executionContext } from "./lib/workbench-context.js";
+import { claimWorkbenchStateOwnership, releaseWorkbenchStateOwnership } from "./lib/workbench.js";
 import { shutdownManagedProcesses } from "./tools/shell.js";
 import { LocalOAuthProvider, setOAuthProvider } from "./lib/oauth-provider.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -60,6 +61,7 @@ function resolveWorkspaceRoots(): string[] {
 const workspaceRoots = resolveWorkspaceRoots();
 const workspaceRoot = workspaceRoots[0] || process.cwd();
 setDefaultCwd(workspaceRoot);
+await claimWorkbenchStateOwnership();
 await initializeLocalAuth();
 
 const upstreamManager = await initUpstreamManager();
@@ -326,12 +328,18 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   console.log(`\n[DUNG] Server dang tat (${signal})...`);
   sessionManager.stopCleanup();
+  // Retain ownership while active HTTP requests drain. A forced exit leaves a
+  // dead-PID claim that a subsequent server can safely ignore.
+  setTimeout(() => process.exit(0), 4000).unref?.();
   void (async () => {
     await shutdownManagedProcesses();
     await upstreamManager.shutdown();
-    adminServer.close();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 4000).unref?.();
+    await Promise.all([
+      new Promise<void>(resolve => adminServer.close(() => resolve())),
+      new Promise<void>(resolve => server.close(() => resolve())),
+    ]);
+    await releaseWorkbenchStateOwnership();
+    process.exit(0);
   })();
 }
 
