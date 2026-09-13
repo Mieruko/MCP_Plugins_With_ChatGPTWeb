@@ -373,11 +373,33 @@ if ($Doctor) {
 
 if (-not (Test-McpServer $resolvedPort)) {
     Write-Host ""
-    Write-Host "[CANH BAO] MCP server chua chay tai http://127.0.0.1:$resolvedPort" -ForegroundColor Yellow
-    Write-Host "Mo terminal khac va chay: .\start.ps1 -Force" -ForegroundColor Cyan
-    Write-Host ""
-    $answer = Read-Host "Van chay tunnel? (y/n)"
-    if ($answer -notmatch '^[yY]') { exit 1 }
+    if ($Force) {
+        # `npm start` launches MCP and this helper almost simultaneously. In a
+        # background/hidden launcher there is nobody available to answer
+        # Read-Host, so an ordinary startup race used to leave the tunnel
+        # process stuck forever before tunnel-client was started. -Force is the
+        # managed/non-interactive path: wait briefly for MCP instead.
+        Write-Host "MCP server chua san sang tai http://127.0.0.1:$resolvedPort - dang cho..." -ForegroundColor Yellow
+        $mcpReady = $false
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            if (Test-McpServer $resolvedPort) {
+                $mcpReady = $true
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $mcpReady) {
+            throw "MCP server khong san sang tai http://127.0.0.1:$resolvedPort sau 15 giay. Tunnel khong duoc khoi dong."
+        }
+        Write-Host "MCP server da san sang." -ForegroundColor Green
+    }
+    else {
+        Write-Host "[CANH BAO] MCP server chua chay tai http://127.0.0.1:$resolvedPort" -ForegroundColor Yellow
+        Write-Host "Mo terminal khac va chay: .\start.ps1 -Force" -ForegroundColor Cyan
+        Write-Host ""
+        $answer = Read-Host "Van chay tunnel? (y/n)"
+        if ($answer -notmatch '^[yY]') { exit 1 }
+    }
 }
 
 Write-Host ""

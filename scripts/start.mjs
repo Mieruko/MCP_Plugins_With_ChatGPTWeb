@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -59,6 +60,40 @@ const noOpen = args.has("--no-open") || process.env.OPEN_UI === "0";
 const noTunnel = args.has("--no-tunnel") || tunnelMode === "off";
 const forceCloudflare = args.has("--cloudflare") || tunnelMode === "cloudflare";
 const forceOpenAI = args.has("--openai") || tunnelMode === "openai";
+const verbose = args.has("--verbose") || process.env.START_VERBOSE === "1";
+const runtimeLogDir = path.join(root, ".runtime-logs");
+const runtimeLogPath = path.join(runtimeLogDir, "npm-start.log");
+fs.mkdirSync(runtimeLogDir, { recursive: true });
+const runtimeLog = fs.createWriteStream(runtimeLogPath, { flags: "a" });
+runtimeLog.write(`\n\n=== npm start ${new Date().toISOString()} ===\n`);
+
+function appendRuntimeLog(source, chunk) {
+  const text = chunk?.toString?.() ?? String(chunk ?? "");
+  runtimeLog.write(`[${source}] ${text}`);
+}
+
+function relayRuntimeOutput(stream, output, source) {
+  stream?.on("data", chunk => {
+    appendRuntimeLog(source, chunk);
+    if (verbose) output.write(chunk);
+  });
+}
+
+async function waitForHttp(url, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
+      if (response.ok) return;
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 120));
+  }
+  throw new Error(`Timed out waiting for ${url}${lastError ? ` (${lastError.message})` : ""}`);
+}
 
 async function freePort(preferred) {
   for (let port = preferred; port < preferred + 100; port++) {
@@ -131,6 +166,7 @@ function startCloudflareTunnel(port) {
     }, 15000);
     const consume = chunk => {
       const text = chunk.toString();
+      appendRuntimeLog("cloudflare", chunk);
       buffer = (buffer + text).slice(-12000);
       const match = buffer.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
       if (match && !settled) {
@@ -168,9 +204,10 @@ function startOpenAiTunnel(port, onRepairableFailure) {
   });
   const shown = new Set();
   let repairTriggered = false;
-  const relay = (stream, output) => stream.on("data", chunk => {
+  const relay = (stream, output, source) => stream.on("data", chunk => {
     const text = chunk.toString();
-    output.write(chunk);
+    appendRuntimeLog(source, chunk);
+    if (verbose) output.write(chunk);
     if (text.includes("tunnel_use_forbidden") && !shown.has("use")) {
       shown.add("use");
       console.error("\n[OpenAI Tunnel] Runtime API key cannot USE this tunnel.");
@@ -190,8 +227,8 @@ function startOpenAiTunnel(port, onRepairableFailure) {
       }
     }
   });
-  relay(child.stdout, process.stdout);
-  relay(child.stderr, process.stderr);
+  relay(child.stdout, process.stdout, "openai-tunnel:stdout");
+  relay(child.stderr, process.stderr, "openai-tunnel:stderr");
   return child;
 }
 
@@ -213,8 +250,11 @@ if (!process.env.WORKSPACE_PATH) process.env.WORKSPACE_PATH = launchCwd;
 
 runBuildIfNeeded();
 
+if (!verbose) console.log("\nStarting The Replace Workbench…");
+
 let tunnelChild = null;
 let tunnelLabel = "disabled";
+let effectiveConnectionMode = "local";
 const hasOpenAiConfig = Boolean(process.env.OPENAI_TUNNEL_ID && process.env.OPENAI_TUNNEL_API_KEY);
 // Cloudflare remains the default tunnel. OpenAI Tunnel is opt-in via
 // --openai or TUNNEL_MODE=openai; merely having credentials must not change
@@ -236,6 +276,7 @@ if (useOpenAiTunnel) {
     process.exit(1);
   }
   tunnelLabel = "OpenAI secure tunnel";
+  effectiveConnectionMode = "openai";
   // Never advertise a stale public Cloudflare origin through OAuth metadata
   // while Secure MCP Tunnel is in use. The connector authenticates via the
   // tunnel connection, while tunnel-client injects the local MCP Bearer token.
@@ -254,25 +295,37 @@ if (!noTunnel && !useOpenAiTunnel && (forceCloudflare || cloudflaredPath())) {
     tunnelChild = tunnel.child;
     process.env.PUBLIC_BASE_URL = tunnel.publicUrl;
     tunnelLabel = tunnel.publicUrl;
+    effectiveConnectionMode = "cloudflare";
   } catch (error) {
     console.warn(`  Tunnel: skipped (${error.message})`);
   }
 }
 
-const workbenchUrl = `http://127.0.0.1:${adminPort}/ui/`;
-console.log("\nThe Replace Workbench\n");
-console.log(`  MCP        http://127.0.0.1:${mcpPort}/mcp`);
-console.log(`  Workbench  ${workbenchUrl}`);
-console.log(`  Tunnel     ${tunnelLabel}`);
-console.log(`  Workspace  ${process.env.WORKSPACE_PATH}`);
-console.log("\n  Press Ctrl+C to stop everything.\n");
+process.env.LOCAL_CODER_CONNECTION_MODE = effectiveConnectionMode;
+
+const workbenchUrl = `http://127.0.0.1:${adminPort}/ui/workbench.html`;
+const workbenchBootstrapToken = randomBytes(32).toString("hex");
+
+function printReadySummary() {
+  if (!verbose && process.stdout.isTTY) console.clear();
+  console.log("\nThe Replace Workbench — READY\n");
+  console.log(`  Workbench  ${workbenchUrl}`);
+  console.log(`  MCP        http://127.0.0.1:${mcpPort}/mcp`);
+  console.log(`  Tunnel     ${tunnelLabel}`);
+  console.log(`  Workspace  ${process.env.WORKSPACE_PATH}`);
+  console.log(`  Logs       ${runtimeLogPath}`);
+  if (!verbose) console.log("  Debug      npm start -- --verbose");
+  console.log("\n  Press Ctrl+C to stop everything.\n");
+}
 
 const server = spawn(process.execPath, [path.join(root, "dist", "index.js")], {
   cwd: root,
-  env: process.env,
-  stdio: "inherit",
+  env: { ...process.env, WORKBENCH_BOOTSTRAP_TOKEN: workbenchBootstrapToken },
+  stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
 });
+relayRuntimeOutput(server.stdout, process.stdout, "server:stdout");
+relayRuntimeOutput(server.stderr, process.stderr, "server:stderr");
 
 let repairingOpenAiTunnel = false;
 async function repairOpenAiTunnel(reason) {
@@ -317,14 +370,33 @@ if (useOpenAiTunnel) {
 const shutdown = () => {
   stopTree(server);
   stopTree(tunnelChild);
+  runtimeLog.end();
 };
 process.once("SIGINT", () => { shutdown(); process.exit(0); });
 process.once("SIGTERM", () => { shutdown(); process.exit(0); });
 process.once("exit", shutdown);
 
-setTimeout(() => openBrowser(workbenchUrl), 600);
-
+let startupComplete = false;
 server.once("exit", code => {
   stopTree(tunnelChild);
+  if (!startupComplete) {
+    console.error(`\nWorkbench server stopped before startup completed. See ${runtimeLogPath}\n`);
+  }
+  runtimeLog.end();
   process.exit(code ?? 0);
 });
+
+try {
+  await Promise.all([
+    waitForHttp(`http://127.0.0.1:${mcpPort}/health`),
+    waitForHttp(workbenchUrl),
+  ]);
+  startupComplete = true;
+  printReadySummary();
+  setTimeout(() => openBrowser(`${workbenchUrl}#bootstrap=${encodeURIComponent(workbenchBootstrapToken)}`), 100);
+} catch (error) {
+  console.error(`\nStartup failed: ${error.message}`);
+  console.error(`Detailed logs: ${runtimeLogPath}\n`);
+  shutdown();
+  process.exit(1);
+}

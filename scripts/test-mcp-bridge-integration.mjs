@@ -6,14 +6,13 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "node:child_process";
+import { freePorts } from "./test-ports.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const scratch = process.env.GOAL_SCRATCH || path.join(root, ".tool-test-tmp", "bridge-integration");
 
-const mcpPort = 4100 + Math.floor(Math.random() * 200);
-const adminPort = mcpPort + 1;
-const mockPort = mcpPort + 2;
+const [mcpPort, adminPort, mockPort] = await freePorts(3);
 const tmpDir = path.join(scratch, `run-${mcpPort}`);
 
 function spawnNode(script, env = {}) {
@@ -106,6 +105,7 @@ const hub = spawnNode(path.join(root, "dist/index.js"), {
   MCP_UPSTREAM_CONFIG: configPath,
   WORKSPACE_PATH: root,
   MCP_AUTH_TOKEN: "bridge-test-mcp", ADMIN_TOKEN: "bridge-test-admin", WORKBENCH_PATH: path.join(tmpDir, "workbench"), WORKBENCH_DEFAULT_MODE: "full", CHATGPT_TOOL_PROFILE: "full",
+  WORKBENCH_EXPERIENCE: "advanced",
 });
 
 let hubLog = "";

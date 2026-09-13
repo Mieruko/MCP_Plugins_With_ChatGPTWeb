@@ -1,23 +1,27 @@
 import { api } from './api.js';
-import { state, currentTask } from './state.js';
+import { state } from './state.js';
 import { $, el, setStatus, taskRelative } from './dom.js';
 import { openOperationReview } from './changes.js';
-import { agentLabel, primeAgentLabels } from './agent-identity.js';
-import { isLiveAgentSession, liveAgentPriority } from './agent-presence.js';
 
-const branchCache = new Map();
+function coordinatorState(agent) {
+  if (agent.taskLifecycle === 'blocked') return { key: 'conflict', label: 'Blocked' };
+  if (agent.taskLifecycle === 'ready_to_merge') return { key: 'ready', label: 'Ready to merge' };
+  if (agent.taskLifecycle === 'merged') return { key: 'merged', label: 'Merged' };
+  if (agent.status === 'approval_required') return { key: 'approval', label: 'Waiting approval' };
+  if (agent.status === 'working') return { key: 'working', label: 'Working' };
+  if (agent.status === 'connected') return { key: 'active', label: 'Connected' };
+  if (agent.status === 'recent') return { key: 'active', label: 'Recent' };
+  if (agent.status === 'waiting') return { key: 'queued', label: 'Waiting for ChatGPT' };
+  return { key: 'idle', label: 'Idle' };
+}
 
-function agentState(session) {
-  const operations = (state.data?.operations || []).filter(operation => operation.sessionId === session.id);
-  const pending = operations.find(operation => operation.status === 'pending');
-  if (pending) return { key: 'approval', label: 'Waiting approval', operation: pending };
-  const running = operations.find(operation => operation.status === 'running');
-  if (running) return { key: 'working', label: 'Working', operation: running };
-  if ((session.inFlightRequests || 0) > 0 || session.state === 'working') return { key: 'working', label: 'Working', operation: operations[0] };
-  if (session.connected || session.state === 'connected') return { key: 'active', label: 'Connected', operation: operations[0] };
-  const age = Date.now() - new Date(session.lastAccessedAt).getTime();
-  if (session.active === false || age > 60_000) return { key: 'idle', label: 'Idle', operation: operations[0] };
-  return { key: 'active', label: 'Recent', operation: operations[0] };
+function taskLifecycleLabel(value) {
+  if (value === 'ready_to_merge') return 'Ready to merge';
+  if (value === 'blocked') return 'Blocked';
+  if (value === 'merged') return 'Merged';
+  if (value === 'completed') return 'Completed';
+  if (value === 'archived') return 'Archived';
+  return 'Open';
 }
 
 function formatTime(value) {
@@ -46,22 +50,36 @@ function renderAgentActivity(entries) {
     return row;
   });
   $('agent-activity-list').replaceChildren(...rows);
-  if (!rows.length) $('agent-activity-list').append(el('p', 'Chưa có activity.', 'empty-copy'));
+  if (!rows.length) $('agent-activity-list').append(el('p', 'No recent activity.', 'empty-copy'));
 }
 
-async function openAgentDetail(session, task, branch) {
-  const status = agentState(session);
-  const operations = (state.data?.operations || []).filter(operation => operation.sessionId === session.id).slice(0, 20);
-  state.currentAgentSessionId = session.id;
-  $('agent-dialog-title').textContent = agentLabel(session.id);
-  $('agent-detail-status').textContent = status.operation ? `${status.label} · ${status.operation.tool}` : status.label;
-  $('agent-detail-status').className = `agent-detail-status ${status.key}`;
-  $('agent-detail-task').textContent = task?.title || session.taskId;
-  $('agent-detail-branch').textContent = branch || '—';
-  $('agent-detail-workspace').textContent = session.workspace;
-  $('agent-detail-client').textContent = session.clientInfo?.name ? `${session.clientInfo.name}${session.clientInfo.version ? ` ${session.clientInfo.version}` : ''}` : 'Unknown client';
-  $('agent-detail-session').textContent = session.id;
-  $('agent-detail-last').textContent = formatTime(session.lastAccessedAt);
+function renderAgentConflicts(agent) {
+  const conflicts = agent.conflicts || [];
+  $('agent-conflicts-section').hidden = !conflicts.length;
+  $('agent-conflict-detail-count').textContent = String(conflicts.length);
+  const rows = conflicts.map(conflict => {
+    const row = el('article', undefined, `agent-conflict-card ${conflict.severity}`);
+    const head = el('div', undefined, 'agent-conflict-card-head');
+    head.append(
+      el('strong', conflict.type === 'path_overlap' ? 'File overlap' : conflict.type === 'shared_environment' ? 'Shared checkout' : 'Shared task'),
+      el('span', conflict.severity === 'conflict' ? 'Conflict' : 'Risk', `agent-conflict-badge ${conflict.severity}`),
+    );
+    row.append(head, el('p', conflict.message));
+    if (conflict.paths?.length) {
+      const files = el('div', undefined, 'agent-conflict-paths');
+      conflict.paths.slice(0, 6).forEach(path => files.append(el('code', path)));
+      if (conflict.paths.length > 6) files.append(el('span', `+${conflict.paths.length - 6} more`));
+      row.append(files);
+    }
+    return row;
+  });
+  $('agent-conflict-list').replaceChildren(...rows);
+}
+
+function renderAgentOperations(agent) {
+  const operations = agent.sessionId
+    ? (state.data?.operations || []).filter(operation => operation.sessionId === agent.sessionId).slice(0, 20)
+    : [];
   $('agent-operation-count').textContent = operations.length;
   const rows = operations.map(operation => {
     const row = el('div', undefined, 'agent-operation-row');
@@ -88,83 +106,138 @@ async function openAgentDetail(session, task, branch) {
     return row;
   });
   $('agent-operation-list').replaceChildren(...rows);
-  if (!rows.length) $('agent-operation-list').append(el('p', 'Chưa có operation.', 'empty-copy'));
+  if (!rows.length) $('agent-operation-list').append(el('p', agent.queued ? 'Waiting for a ChatGPT session.' : 'No recent operations.', 'empty-copy'));
+  return operations;
+}
+
+async function cancelAssignment(agent) {
+  await api(`/api/workbench/tasks/${encodeURIComponent(agent.taskId)}/assignment`, { method: 'DELETE' });
+  $('agent-dialog').close();
+  await loadAgents();
+  setStatus(`Assignment cancelled · ${agent.taskTitle}`);
+}
+
+async function openAgentDetail(agent) {
+  const status = coordinatorState(agent);
+  const operations = renderAgentOperations(agent);
+  const pending = operations.find(operation => operation.status === 'pending');
+  state.currentAgentSessionId = agent.sessionId || null;
+  state.currentAgentId = agent.id;
+  $('agent-dialog-title').textContent = agent.taskTitle || 'Agent';
+  $('agent-detail-status').textContent = status.label;
+  $('agent-detail-status').className = `agent-detail-status ${status.key}`;
+  $('agent-detail-task').textContent = agent.taskTitle || agent.taskId;
+  $('agent-detail-lifecycle').textContent = taskLifecycleLabel(agent.taskLifecycle);
+  $('agent-detail-branch').textContent = agent.branch || '—';
+  $('agent-detail-changes').textContent = `${agent.changedPaths?.length || 0} file${agent.changedPaths?.length === 1 ? '' : 's'}`;
+  $('agent-detail-preview').textContent = agent.previewPort
+    ? `${agent.previewRunning ? 'Running' : 'Configured'} · :${agent.previewPort}`
+    : '—';
+  $('agent-detail-workspace').textContent = agent.executionPath || agent.workspace || '—';
+  $('agent-detail-client').textContent = agent.queued
+    ? 'Waiting for next ChatGPT session'
+    : agent.clientInfo?.name ? `${agent.clientInfo.name}${agent.clientInfo.version ? ` ${agent.clientInfo.version}` : ''}` : 'ChatGPT';
+  $('agent-detail-id').textContent = agent.agentId || (agent.assignmentId ? `assignment:${agent.assignmentId}` : agent.id);
+  $('agent-detail-session').textContent = agent.sessionId || 'Waiting for next ChatGPT session';
+  $('agent-detail-last').textContent = formatTime(agent.lastSeenAt || agent.createdAt);
+  renderAgentConflicts(agent);
+
   const reviewCurrent = $('agent-review-current');
-  reviewCurrent.hidden = status.key !== 'approval' || !status.operation;
-  reviewCurrent.onclick = status.operation ? () => {
+  reviewCurrent.hidden = !pending;
+  reviewCurrent.onclick = pending ? () => {
     $('agent-dialog').close();
-    void openOperationReview(status.operation.id).catch(error => setStatus(error.message));
+    void openOperationReview(pending.id).catch(error => setStatus(error.message));
   } : null;
+  const cancel = $('agent-cancel-assignment');
+  cancel.hidden = !agent.queued;
+  cancel.onclick = agent.queued ? () => void cancelAssignment(agent).catch(error => setStatus(error.message)) : null;
+  const openPreview = $('agent-open-preview');
+  openPreview.hidden = !(agent.previewRunning && agent.previewUrl);
+  openPreview.onclick = openPreview.hidden ? null : () => window.open(agent.previewUrl, '_blank', 'noopener,noreferrer');
   $('agent-open-task').onclick = () => {
     $('agent-dialog').close();
-    window.dispatchEvent(new CustomEvent('workbench:switch-task', { detail: { taskId: session.taskId } }));
+    window.dispatchEvent(new CustomEvent('workbench:switch-task', { detail: { taskId: agent.taskId } }));
   };
   $('agent-filter-changes').onclick = () => {
     $('agent-dialog').close();
-    window.dispatchEvent(new CustomEvent('workbench:show-agent-changes', { detail: { taskId: session.taskId, sessionId: session.id } }));
+    if (agent.sessionId) {
+      window.dispatchEvent(new CustomEvent('workbench:show-agent-changes', { detail: { taskId: agent.taskId, sessionId: agent.sessionId } }));
+    } else {
+      window.dispatchEvent(new CustomEvent('workbench:switch-task', { detail: { taskId: agent.taskId } }));
+    }
   };
   $('agent-dialog').showModal();
+
+  if (!agent.sessionId) {
+    $('agent-activity-count').textContent = '0';
+    $('agent-activity-list').replaceChildren(el('p', 'Activity starts when a ChatGPT session claims this task.', 'empty-copy'));
+    return;
+  }
   $('agent-activity-list').replaceChildren(el('p', 'Loading activity…', 'empty-copy'));
   try {
-    const activity = await api(`/api/activity?limit=80&kind=tool&task=${encodeURIComponent(session.taskId)}&q=${encodeURIComponent(session.id)}`);
-    if (state.currentAgentSessionId === session.id) renderAgentActivity(activity.entries || []);
+    const activity = await api(`/api/activity?limit=80&kind=tool&task=${encodeURIComponent(agent.taskId)}&q=${encodeURIComponent(agent.sessionId)}`);
+    if (state.currentAgentId === agent.id) renderAgentActivity(activity.entries || []);
   } catch (error) {
-    if (state.currentAgentSessionId === session.id) $('agent-activity-list').replaceChildren(el('p', `Activity unavailable: ${error.message}`, 'empty-copy'));
+    if (state.currentAgentId === agent.id) $('agent-activity-list').replaceChildren(el('p', `Activity unavailable: ${error.message}`, 'empty-copy'));
   }
 }
 
-async function branchForTask(taskId) {
-  const selected = currentTask();
-  if (selected?.id === taskId && state.git?.branch) return state.git.branch;
-  const cached = branchCache.get(taskId);
-  if (cached && Date.now() - cached.time < 5000) return cached.branch;
-  try {
-    const git = await api(`/api/workbench/tasks/${taskId}/git/status`);
-    const branch = git.branch || '—';
-    branchCache.set(taskId, { branch, time: Date.now() });
-    return branch;
-  } catch {
-    return '—';
-  }
+function renderConnectionStatus(health) {
+  $('mcp-dot').classList.remove('muted-dot', 'attention-dot');
+  $('mcp-state').textContent = 'Ready';
+  const chatgpt = health.chatgpt || { status: 'not_connected', connected: false, active_sessions: 0, pending_approvals: 0 };
+  const chatgptDot = $('chatgpt-dot');
+  chatgptDot.classList.remove('muted-dot', 'attention-dot');
+  let chatgptLabel = 'Not connected';
+  if (chatgpt.status === 'connected') chatgptLabel = 'Connected';
+  else if (chatgpt.status === 'approval_required') {
+    chatgptLabel = 'Approval required';
+    chatgptDot.classList.add('attention-dot');
+  } else chatgptDot.classList.add('muted-dot');
+  $('chatgpt-state').textContent = chatgptLabel;
+  $('status-mcp').replaceChildren(
+    el('i', '', 'dot'),
+    document.createTextNode(`MCP ready · ChatGPT ${chatgptLabel.toLowerCase()}`),
+  );
 }
 
 export async function loadAgents() {
-  const health = await api('/health');
+  const [health, coordinator] = await Promise.all([api('/health'), api('/api/workbench/agents')]);
   state.health = health;
-  const allSessions = [...(health.sessions || [])].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-  const operations = state.data?.operations || [];
-  const sessions = allSessions
-    .filter(session => isLiveAgentSession(session, operations))
-    .sort((a, b) => {
-      const priority = liveAgentPriority(a, operations) - liveAgentPriority(b, operations);
-      if (priority !== 0) return priority;
-      return new Date(b.lastAccessedAt).getTime() - new Date(a.lastAccessedAt).getTime();
-    });
-  primeAgentLabels(sessions);
-  const tasks = new Map((state.data?.tasks || []).map(task => [task.id, task]));
-  const branchPairs = await Promise.all([...new Set(sessions.map(session => session.taskId))].map(async taskId => [taskId, await branchForTask(taskId)]));
-  const branches = new Map(branchPairs);
-  const rows = sessions.map(session => {
-    const task = tasks.get(session.taskId);
-    const status = agentState(session);
-    const row = el('div', undefined, 'agent-row');
+  state.agentCoordinator = coordinator;
+  const agents = (coordinator.agents || []).filter(agent => agent.active || agent.queued || agent.conflicts?.length);
+  const rows = agents.map(agent => {
+    const status = coordinatorState(agent);
+    const hasConflict = (agent.conflicts || []).some(conflict => conflict.severity === 'conflict');
+    const row = el('div', undefined, `agent-row${hasConflict ? ' has-conflict' : ''}${agent.queued ? ' queued' : ''}`);
     const name = el('span', undefined, 'agent-cell agent-name');
-    name.append(el('i', '', `dot agent-dot ${status.key}`), el('span', agentLabel(session.id)));
+    name.append(el('i', '', `dot agent-dot ${hasConflict ? 'conflict' : status.key}`), el('span', agent.taskTitle || 'ChatGPT agent'));
+    const changeCopy = hasConflict
+      ? `⚠ ${agent.conflicts.filter(conflict => conflict.severity === 'conflict').length} · ${agent.changedPaths.length} files`
+      : `${agent.changedPaths.length} file${agent.changedPaths.length === 1 ? '' : 's'}`;
     row.append(
       name,
-      el('span', status.label, `agent-cell agent-status-cell ${status.key}`),
-      el('span', task?.title || session.taskId.slice(0, 8), 'agent-cell'),
-      el('span', branches.get(session.taskId) || '—', 'agent-cell'),
+      el('span', status.label, `agent-cell agent-status-cell ${hasConflict ? 'conflict' : status.key}`),
+      el('span', agent.branch || '—', 'agent-cell agent-branch-cell'),
+      el('span', changeCopy, `agent-cell agent-change-cell${hasConflict ? ' conflict' : ''}`),
     );
-    row.title = `${status.label}${status.operation ? ` · ${status.operation.tool}` : ''}\n${session.id}\n${session.workspace}`;
-    row.onclick = () => void openAgentDetail(session, task, branches.get(session.taskId));
+    row.title = `${agent.taskTitle}\n${status.label}\n${agent.branch || 'No branch'}${agent.previewPort ? `\nPreview :${agent.previewPort}${agent.previewRunning ? ' running' : ''}` : ''}\n${agent.executionPath || agent.workspace}`;
+    row.onclick = () => void openAgentDetail(agent);
     return row;
   });
   $('agent-list').replaceChildren(...rows);
-  if (!rows.length) $('agent-list').append(el('p', 'Chưa có ChatGPT session đang hoạt động.', 'empty-copy'));
-  $('agent-count').textContent = `${sessions.length} active`;
-  $('status-agents').textContent = `${sessions.length} agent${sessions.length === 1 ? '' : 's'} active`;
-  $('mcp-dot').classList.toggle('muted-dot', sessions.length === 0);
-  $('mcp-state').textContent = sessions.length ? 'Connected' : 'Waiting';
-  $('status-mcp').replaceChildren(el('i', '', `dot${sessions.length ? '' : ' muted-dot'}`), document.createTextNode(sessions.length ? 'MCP connected' : 'No active chat'));
+  if (!rows.length) $('agent-list').append(el('p', 'No ChatGPT agents or queued tasks.', 'empty-copy'));
+
+  const summary = coordinator.summary || { active: 0, waiting: 0, conflicts: 0 };
+  $('agent-active-count').textContent = String(summary.active || 0);
+  $('agent-waiting-count').textContent = String(summary.waiting || 0);
+  $('agent-conflict-count').textContent = String(summary.conflicts || 0);
+  $('agent-conflict-summary').classList.toggle('attention', Boolean(summary.conflicts));
+  const countParts = [`${summary.active || 0} active`];
+  if (summary.waiting) countParts.push(`${summary.waiting} waiting`);
+  if (summary.conflicts) countParts.push(`${summary.conflicts} conflict`);
+  $('agent-count').textContent = countParts.join(' · ');
+  $('status-agents').textContent = `${summary.active || 0} agent${summary.active === 1 ? '' : 's'} active${summary.waiting ? ` · ${summary.waiting} waiting` : ''}`;
+  renderConnectionStatus(health);
+  window.dispatchEvent(new CustomEvent('workbench:agents-updated', { detail: { coordinator } }));
 }

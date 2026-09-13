@@ -1,8 +1,12 @@
 <div align="center">
 
-# MCP Plugins With ChatGPT Web
+# MCP Plugins With ChatGPT Web · v1.0.0
 
 **A self-hosted local coding Workbench that connects ChatGPT Web to your machine through MCP.**
+
+**Start with Basic — the recommended experience for everyday coding.**
+
+[Download v1.0.0](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/releases/tag/v1.0.0) · [Release notes](docs/releases/v1.0.0.md)
 
 Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Diff · Checkpoints · Upstream MCP
 
@@ -19,6 +23,8 @@ Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Di
 ---
 
 ## About this project
+
+Version 1 brings Basic project workflows, Advanced task/worktree coordination, persistent handoffs, bounded MCP history and optional permission changes from chat into one release. Basic is the default for new projects and is recommended unless you need parallel tasks and a merge queue.
 
 **MCP Plugins With ChatGPT Web** turns ChatGPT Web into a local coding agent while keeping the project, terminal, Git state and approval flow on your own computer.
 
@@ -76,7 +82,7 @@ The Workbench and MCP server use the same underlying task, permission and tool e
 
 ## Requirements
 
-- Node.js 18+;
+- Node.js 22+ recommended for v1 (the release test environment uses Node.js 22);
 - npm;
 - Git for Git features;
 - GitHub CLI (`gh`) for GitHub PR / Issue features;
@@ -90,11 +96,12 @@ Clone **this fork**:
 ```powershell
 git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
 cd MCP_Plugins_With_ChatGPTWeb
-npm install
+git checkout v1.0.0
+npm ci
 npm start
 ```
 
-`npm start` is the normal launcher. On first run it opens a setup wizard, then builds when needed, starts MCP + Workbench, starts the selected tunnel, opens the Workbench, and stops its child processes when you exit.
+`npm start` is the normal launcher. On first run it opens a setup wizard, then builds when needed, starts MCP + Workbench, starts the selected tunnel, opens the Workbench, and stops its child processes when you exit. The local Workbench authenticates automatically with a one-time launcher bootstrap and an HttpOnly browser session; users do not need to find or paste an admin token.
 
 The first-run wizard asks for the workspace and one connection mode:
 
@@ -143,6 +150,7 @@ ADMIN_PORT=3001
 # WORKSPACE_PATH=D:\projects\my-app
 CHATGPT_TOOL_PROFILE=slim
 WORKBENCH_DEFAULT_MODE=ask
+WORKBENCH_EXPERIENCE=basic
 ```
 
 `WORKSPACE_PATH` is optional. Additional projects can be registered directly from the Workbench with **Add workspace**; they do not require a server restart.
@@ -159,7 +167,22 @@ http://127.0.0.1:3001/ui/workbench.html
 
 The admin server is bound to localhost. Authentication credentials are generated/stored locally when explicit environment overrides are not configured.
 
-### Workspaces and tasks
+### Basic and Advanced experiences
+
+**Basic is recommended** for everyday coding, including continuing the same project across ChatGPT conversations. New projects open in Basic: one project, a default task managed internally, full coding tools, approval requests, grouped recent work, Review and Undo/Redo. On a fresh installation, the configured `WORKSPACE_PATH` is opened automatically. Additional project folders can be added from the project switcher.
+
+| Experience | Choose it when | Coding tools |
+| --- | --- | --- |
+| **Basic · Recommended** | You want ChatGPT to work on a project with straightforward review and Undo. | Complete tool registry; one writer conversation at a time. |
+| **Advanced** | You need separate tasks, parallel worktrees, previews and a merge queue. | Same tools; additional coordination controls. |
+
+Use the **Basic / Advanced** button beside Permissions, or **Settings → Experience**, to change the current project's experience. **Advanced** exposes the existing tasks, agent coordinator, worktrees, preview runtimes and integration queue. Files, task history and existing session bindings are preserved. Finish/discard active parallel work, resolve approvals and stop runtimes before returning to Basic; the dialog lists any blockers.
+
+Basic allows one MCP conversation to control changes at a time. The first mutation claims write control; other conversations can read. Open **ChatGPT write control → Choose conversation → Give write control** to transfer it. Transfers invalidate old pending approvals and wait until managed processes and preview ports have been released. The chosen conversation must retry its rejected request. This check also applies to shell, Git and upstream mutations, including in Full permission mode.
+
+Existing saved projects retain **Advanced** when upgrading. `WORKBENCH_EXPERIENCE=basic|advanced` sets the default for new projects only; it does not change saved projects, approval settings (`WORKBENCH_DEFAULT_MODE`) or exposed tools (`CHATGPT_TOOL_PROFILE`). See [experience behavior and limitations](docs/experience.md).
+
+### Workspaces, tasks and session binding
 
 A **Workspace** represents a local project directory. A workspace may exist before it has any task.
 
@@ -237,7 +260,7 @@ Core capabilities include:
 
 | Area | Examples |
 | --- | --- |
-| Workbench | `workbench` |
+| Workbench | `workbench`, `workbench_control`, `task_handoff`, `task_complete` |
 | Batched inspection | `inspect_code` |
 | Files | `read_text_file`, `write_file`, `edit_file`, `multi_edit`, `apply_patch` |
 | Search | `glob`, `grep`, `list_directory` |
@@ -246,7 +269,7 @@ Core capabilities include:
 | Git | `git_status`, `git_diff`, `git_add`, `git_commit`, `git_restore` |
 | Git remote | `git_fetch`, `git_pull`, `git_push` |
 | Git structure | `git_branch`, `git_worktree`, `git_log` |
-| Project context | `agent_status`, `project_context`, `load_path_rules`, `remember` |
+| Project context | `agent_status`, `project_context`, `load_path_rules`, `skills`, `remember` |
 | History | `rewind` |
 | GitHub | `github` |
 | MCP hub | `mcp_servers` and upstream MCP proxy tools |
@@ -303,6 +326,22 @@ Each task has a permission mode:
 | **Full** | Workbench approval prompts are disabled for the task. |
 
 The workspace-only scope is independent from the approval mode.
+
+### Change permissions from chat
+
+The owner can enable conversational permission control once in the server's local `.env`:
+
+```dotenv
+WORKBENCH_REMOTE_POLICY_CONTROL=true
+```
+
+After restarting the server and refreshing the connector's tool definitions, say **“Bật Full quyền cho task này”**. The agent reads the current policy revision and calls `workbench_control(action=set_policy, mode=full, workspace_only=false, expected_revision=...)`. Say **“Tắt Full, hỏi trước khi sửa”** to return to Ask with workspace-only scope. Auto is also supported. Set the installation option back to `false` to disable conversational policy changes.
+
+This opt-in authorizes authenticated MCP conversations to change their bound task's policy. It does not grant another conversation the Basic writer lease. Policy changes are recorded in history and expire existing pending approvals without executing them. Full does not automatically carry over when targeting another project. Workspace/task creation and retargeting require Full with machine scope on the source task; running processes and preview leases must be stopped before a retarget releases its writer.
+
+Workbench has no content filter that prohibits application account creation, credentials, or password seed files. Full allows the normal file/command tools to perform user-authorized setup. Client/connector review is independent: report its actual error if it rejects a request before it reaches this server. Changing Workbench permissions cannot disable that separate layer.
+
+History returns bounded summaries without pending file bodies or command arguments. Handoff approvals detect intervening changes and preserve the newer handoff on conflict.
 
 ### Workspace path protection
 
@@ -381,6 +420,7 @@ npm run dev
 npm run test:workbench
 npm run test:chatgpt
 npm run test:integration
+node scripts/run-all-tests.mjs --readiness-only
 ```
 
 The main source is TypeScript under `src/`; the Workbench frontend is under `public/ui/`.

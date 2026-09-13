@@ -9,6 +9,7 @@ import { toolResult } from "../lib/tool-result.js";
 import { ProcessLog } from "../lib/process-log.js";
 import { executionContext, childEnvironment } from "../lib/workbench-context.js";
 import { executionNeedsSandbox, spawnSandboxedShell, terminateSandboxContainer } from "../lib/os-sandbox.js";
+import { forgetTaskRuntimeProcess, registerTaskRuntimeProcess } from "../lib/task-runtime.js";
 import {
   bootstrapShellSession,
   execInShellSession,
@@ -225,6 +226,18 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
         ...(launched ? { sandbox: launched.provider, sandboxContainerName: launched.containerName } : {}),
       };
       processes.set(id, item);
+      if (item.taskId) {
+        registerTaskRuntimeProcess({
+          taskId: item.taskId,
+          id: item.id,
+          ...(child.pid === undefined ? {} : { pid: child.pid }),
+          command: item.command,
+          cwd: item.cwd,
+          startedAt: item.startedAt,
+          isRunning: () => !item.finished,
+          stop: force => terminateManagedProcess(item, force),
+        });
+      }
       const notify = () => { for (const listener of item.listeners) listener(); };
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
@@ -333,8 +346,9 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
     async () => {
       let cleared = 0;
       for (const [id, item] of processes) {
-        if (item.finished && item.taskId === executionContext.getStore()?.taskId) {
+        if (item.taskId && item.finished && item.taskId === executionContext.getStore()?.taskId) {
           processes.delete(id);
+          forgetTaskRuntimeProcess(item.taskId, id);
           cleared++;
         }
       }

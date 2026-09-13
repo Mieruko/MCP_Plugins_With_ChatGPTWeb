@@ -5,6 +5,7 @@ import { registerInspectTools } from "./tools/inspect.js";
 import { registerShellTools } from "./tools/shell.js";
 import { registerGitTools } from "./tools/git.js";
 import { registerContextTools } from "./tools/context.js";
+import { registerSkillsTool } from "./tools/skills.js";
 import { registerRewindTools } from "./tools/rewind.js";
 import { registerMcpBridgeTools } from "./tools/mcp-bridge.js";
 import { buildServerInstructions } from "./lib/quickstart.js";
@@ -42,7 +43,9 @@ export function createMcpServer(
   upstreamManager?: McpUpstreamManager,
   projectMemoryInstructions?: string,
   pinnedTaskId?: string,
-  pinnedSessionId?: string
+  pinnedSessionId?: string,
+  clientType: "chatgpt" | "mcp" = "mcp",
+  onTaskRetarget?: (taskId: string, workspace: string) => void,
 ): McpServer {
   const server = new McpServer(
     {
@@ -64,7 +67,7 @@ export function createMcpServer(
   );
 
   applyToolProfile(server);
-  installWorkbench(server, workspaceRoot, pinnedTaskId, pinnedSessionId);
+  installWorkbench(server, workspaceRoot, pinnedTaskId, pinnedSessionId, clientType, onTaskRetarget);
 
   // ChatGPT may probe resources/list while scanning a custom MCP app. Expose a
   // tiny stable resource so connector discovery succeeds even though this
@@ -92,6 +95,7 @@ export function createMcpServer(
   registerGitTools(server, workspaceRoot);
   registerGithubTools(server, workspaceRoot);
   registerContextTools(server, workspaceRoot);
+  registerSkillsTool(server);
   registerRewindTools(server);
 
   if (upstreamManager) {

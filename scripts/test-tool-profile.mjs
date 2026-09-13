@@ -17,7 +17,7 @@ try {
   if (SLIM_CHATGPT_TOOLS.size < 18) throw new Error(`slim set too small: ${SLIM_CHATGPT_TOOLS.size}`);
   ok(`slim profile has ${SLIM_CHATGPT_TOOLS.size} tools`);
 
-  for (const t of ["apply_patch", "glob", "remember", "load_path_rules", "inspect_code", "stop_process"]) {
+  for (const t of ["apply_patch", "glob", "remember", "load_path_rules", "inspect_code", "stop_process", "task_handoff", "workbench_control"]) {
     if (!shouldExposeTool(t, "slim")) throw new Error(`${t} missing from slim`);
   }
   ok("core tools exposed in slim");

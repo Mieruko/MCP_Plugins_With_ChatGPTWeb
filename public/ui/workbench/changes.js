@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { currentWorkspace, currentWorkspaceOperations, state } from './state.js';
+import { currentWorkspace, currentWorkspaceOperations, isBasic, state } from './state.js';
 import { $, el, renderUnifiedDiff, setStatus } from './dom.js';
 import { invalidateRestoredEditorTabs, openFile, openGitDiff, openTextDiff } from './editor.js';
 import { agentLabel } from './agent-identity.js';
@@ -11,6 +11,16 @@ function taskForOperation(operation) {
 
 function pendingOperations() {
   return currentWorkspaceOperations().filter(operation => operation.status === 'pending');
+}
+
+function actionLabel(operation) {
+  const labels = { write_file: 'Edit file', edit_file: 'Edit file', apply_patch: 'Edit files', multi_edit: 'Edit file',
+    run_command: 'Run command', start_process: 'Start process', git_commit: 'Commit changes', git_push: 'Push commits' };
+  return labels[operation.tool] || operation.tool.replaceAll('_', ' ');
+}
+
+function approvalLabel(operation) {
+  return isBasic() ? `ChatGPT wants to ${actionLabel(operation).toLowerCase()}` : operation.tool;
 }
 
 function connectionExpiryLabel(expiresAt) {
@@ -284,7 +294,7 @@ function renderWorkspaceReview() {
   $('workspace-review-deletions').textContent = `−${review.review?.deletions || 0}`;
   const task = taskForOperation(review);
   const owner = review.sessionId ? agentLabel(review.sessionId) : 'Local / external';
-  scope.title = `${task?.title || 'Workspace task'} · ${owner} · ${review.operationCount || 1} operation${review.operationCount === 1 ? '' : 's'}`;
+  scope.title = isBasic() ? 'Recent ChatGPT work' : `${task?.title || 'Workspace task'} · ${owner} · ${review.operationCount || 1} operation${review.operationCount === 1 ? '' : 's'}`;
 
   const expanded = Boolean(state.workspaceReviewExpanded && count > 3);
   list.classList.toggle('expanded', expanded);
@@ -379,6 +389,181 @@ function matchesFilter(change) {
   return kindMatch && agentMatch;
 }
 
+function reviewCenterMatches(change) {
+  return state.reviewCenterFilter === 'all' || Boolean(change[state.reviewCenterFilter]);
+}
+
+function reviewedChangeKey(path) {
+  return normalizePath(path).toLowerCase();
+}
+
+function pruneReviewedChanges() {
+  const current = new Set(state.changes.map(change => reviewedChangeKey(change.path)));
+  for (const key of [...state.reviewedChanges]) {
+    if (!current.has(key)) state.reviewedChanges.delete(key);
+  }
+}
+
+function renderReviewButton() {
+  const changes = isBasic() ? Math.max(state.changes.length, state.workspaceReview?.review?.files?.length || 0) : state.changes.length;
+  const attention = pendingOperations().length + (state.connections || []).length;
+  const recentFiles = state.workspaceReview?.review?.files?.length || 0;
+  $('review-change-count').textContent = String(changes);
+  const attentionBadge = $('review-attention-count');
+  attentionBadge.textContent = String(attention);
+  attentionBadge.hidden = attention === 0;
+  $('review-button').disabled = changes === 0 && attention === 0 && recentFiles === 0;
+  $('review-button').title = attention
+    ? `${changes} workspace change${changes === 1 ? '' : 's'} · ${attention} item${attention === 1 ? '' : 's'} need attention`
+    : `${changes} workspace change${changes === 1 ? '' : 's'}`;
+}
+
+async function openReviewCenterChange(change) {
+  state.reviewedChanges.add(reviewedChangeKey(change.path));
+  renderReviewCenter();
+  const meta = isBasic() ? 'Project changes' : change.agentTouch ? `${change.agentTouch.label} · ${change.agentTouch.tool}` : 'Local / external';
+  if (change.untracked && !change.staged && !change.unstaged) return openFile(change.path, { meta, preview: true });
+  return openGitDiff(change.path, !change.unstaged && change.staged, { meta, preview: true });
+}
+
+function reviewCenterActionButton(label, onClick, className = 'mini-action') {
+  const button = el('button', label, className);
+  button.type = 'button';
+  button.onclick = event => {
+    event?.stopPropagation?.();
+    void Promise.resolve().then(() => onClick(button)).catch(error => setStatus(error.message));
+  };
+  return button;
+}
+
+function renderReviewCenter() {
+  const center = $('review-center');
+  if (!center) return;
+  pruneReviewedChanges();
+  const workspace = currentWorkspace();
+  const entries = state.changes;
+  const filtered = entries.filter(reviewCenterMatches);
+  const staged = entries.filter(change => change.staged);
+  const pending = pendingOperations();
+  const connections = state.connections || [];
+  const attention = pending.length + connections.length;
+  const reviewedCount = entries.filter(change => state.reviewedChanges.has(reviewedChangeKey(change.path))).length;
+  const reviewedStageable = entries.filter(change => state.reviewedChanges.has(reviewedChangeKey(change.path)) && (change.unstaged || change.untracked));
+
+  $('review-center-scope').textContent = workspace?.name || workspace?.path || 'Current workspace';
+  $('review-center-change-count').textContent = String(entries.length);
+  $('review-center-staged-count').textContent = String(staged.length);
+  $('review-center-attention-count').textContent = String(attention);
+  $('review-center-branch').textContent = state.gitError ? 'Source control unavailable' : (state.git?.branch || 'Working tree');
+  $('review-center-reviewed-meta').textContent = `${reviewedCount}/${entries.length} reviewed`;
+  $('review-center-filter-all').textContent = String(entries.length);
+  $('review-center-filter-modified').textContent = String(entries.filter(change => change.unstaged).length);
+  $('review-center-filter-staged').textContent = String(staged.length);
+  $('review-center-filter-added').textContent = String(entries.filter(change => change.untracked).length);
+  document.querySelectorAll('.review-center-filter').forEach(button => button.classList.toggle('active', button.dataset.reviewFilter === state.reviewCenterFilter));
+
+  const next = filtered.find(change => !state.reviewedChanges.has(reviewedChangeKey(change.path))) || filtered[0];
+  $('review-center-next').disabled = !next;
+  $('review-center-next').textContent = filtered.length && filtered.every(change => state.reviewedChanges.has(reviewedChangeKey(change.path))) ? 'Review again' : 'Review next';
+  $('review-center-stage-reviewed').disabled = reviewedStageable.length === 0;
+  $('review-center-stage-reviewed').textContent = reviewedStageable.length ? `Stage reviewed (${reviewedStageable.length})` : 'Stage reviewed';
+
+  const attentionSection = $('review-center-attention-section');
+  attentionSection.hidden = attention === 0;
+  $('review-center-attention-meta').textContent = String(attention);
+  const attentionCards = [];
+  for (const connection of connections) {
+    const card = el('article', undefined, 'review-center-attention-card');
+    const head = el('div', undefined, 'review-center-card-head');
+    const copy = el('div', undefined, 'review-center-card-copy');
+    copy.append(el('strong', connection.clientName || 'ChatGPT connection'), el('span', connection.redirectUri || 'wants to connect to Local Coder'));
+    head.append(copy, el('span', connectionExpiryLabel(connection.expiresAt), 'review-center-card-meta'));
+    const actions = el('div', undefined, 'review-center-card-actions');
+    const reject = reviewCenterActionButton('Reject', async button => {
+      button.disabled = true;
+      await decideConnection(connection.id, false);
+    }, 'mini-action danger-mini');
+    const accept = reviewCenterActionButton('Accept connection', async button => {
+      button.disabled = true;
+      await decideConnection(connection.id, true);
+    }, 'mini-action');
+    actions.append(reject, accept);
+    card.append(head, actions);
+    attentionCards.push(card);
+  }
+  for (const operation of pending) {
+    const card = el('article', undefined, 'review-center-attention-card');
+    const head = el('div', undefined, 'review-center-card-head');
+    const copy = el('div', undefined, 'review-center-card-copy');
+    const task = taskForOperation(operation);
+    const owner = operation.sessionId ? agentLabel(operation.sessionId) : 'Local / external';
+    const fileCount = operation.review?.files?.length || operation.changes?.length || 0;
+    copy.append(el('strong', approvalLabel(operation)), el('span', isBasic() ? `${fileCount} files · review request` : `${task?.title || 'Workspace task'} · ${owner} · ${fileCount} file${fileCount === 1 ? '' : 's'}`));
+    head.append(copy, el('span', `+${operation.review?.additions || 0} −${operation.review?.deletions || 0}`, 'review-center-card-meta'));
+    const actions = el('div', undefined, 'review-center-card-actions');
+    actions.append(reviewCenterActionButton('Review approval', () => openOperationReview(operation.id)));
+    card.append(head, actions);
+    attentionCards.push(card);
+  }
+  $('review-center-attention-list').replaceChildren(...attentionCards);
+
+  const changeRows = filtered.map(change => {
+    const reviewed = state.reviewedChanges.has(reviewedChangeKey(change.path));
+    const row = el('div', undefined, `review-center-change${reviewed ? ' reviewed' : ''}`);
+    const main = el('button', undefined, 'review-center-change-main');
+    main.type = 'button';
+    const code = statusCode(change);
+    const copy = el('span', undefined, 'review-center-change-copy');
+    const touch = change.agentTouch;
+    copy.append(el('strong', change.path), el('span', isBasic() ? kindLabel(change) : `${kindLabel(change)} · ${touch ? `${touch.label} · ${touch.tool}` : 'Local / external'}`));
+    main.append(el('span', code, `change-code${code === 'A' ? ' added' : ''}`), copy, el('span', reviewed ? '✓ reviewed' : '', 'reviewed-mark'));
+    main.onclick = () => void openReviewCenterChange(change).catch(error => setStatus(error.message));
+    const actions = el('div', undefined, 'review-center-change-actions');
+    if (change.unstaged || change.untracked) actions.append(reviewCenterActionButton('Stage', () => stageFiles([change.path])));
+    if (change.staged) actions.append(reviewCenterActionButton('Unstage', () => unstageFiles([change.path])));
+    if (change.unstaged && !change.staged && !change.untracked) actions.append(reviewCenterActionButton('Discard', () => discardTrackedFile(change.path), 'mini-action danger-mini'));
+    row.append(main, actions);
+    return row;
+  });
+  $('review-center-changes-list').replaceChildren(...changeRows);
+  if (!changeRows.length) $('review-center-changes-list').append(el('p', entries.length ? 'No files match this Review Center filter.' : 'Working tree clean.', 'empty-copy'));
+
+  const recentSection = $('review-center-recent-section');
+  const recentHost = $('review-center-recent-work');
+  const recent = state.workspaceReview;
+  const recentFiles = recent?.review?.files || [];
+  recentSection.hidden = !recent || !recentFiles.length;
+  if (recent && recentFiles.length) {
+    const task = taskForOperation(recent);
+    const owner = recent.sessionId ? agentLabel(recent.sessionId) : 'Local / external';
+    $('review-center-recent-meta').textContent = isBasic() ? 'Latest edits' : `${recent.operationCount || 1} operation${recent.operationCount === 1 ? '' : 's'}`;
+    const card = el('article', undefined, 'review-center-recent-card');
+    const head = el('div', undefined, 'review-center-card-head');
+    const copy = el('div', undefined, 'review-center-card-copy');
+    copy.append(el('strong', isBasic() ? (recent.sessionId ? 'Recent ChatGPT work' : 'Your recent edits') : `${owner} · ${task?.title || 'Workspace task'}`), el('span', `${recentFiles.length} file${recentFiles.length === 1 ? '' : 's'} · ${isBasic() ? 'recent edits' : 'latest recorded change set'}`));
+    head.append(copy, el('span', `+${recent.review?.additions || 0} −${recent.review?.deletions || 0}`, 'review-center-card-meta'));
+    const actions = el('div', undefined, 'review-center-card-actions');
+    actions.append(reviewCenterActionButton(isBasic() ? 'Review changes' : 'Review change set', () => openChangeSetReview(recent.id)));
+    if (recent.canUndo || recent.canRedo) {
+      const redo = Boolean(recent.canRedo && !recent.canUndo);
+      actions.append(reviewCenterActionButton(redo ? 'Redo ↷' : 'Undo ↶', () => restoreChangeSet(recent.id, redo)));
+    }
+    const files = el('div', undefined, 'review-center-recent-files');
+    for (const file of recentFiles.slice(0, 6)) {
+      const button = el('button', undefined, 'review-center-recent-file');
+      button.type = 'button';
+      button.append(el('code', relativeForTask(file.path, task)), el('span', `+${file.additions || 0}`, 'additions'), el('span', `−${file.deletions || 0}`, 'deletions'));
+      button.onclick = () => void openChangeSetFileDiff(recent.id, file.path).catch(error => setStatus(error.message));
+      files.append(button);
+    }
+    if (recentFiles.length > 6) files.append(el('p', `+${recentFiles.length - 6} more files`, 'empty-copy'));
+    card.append(head, actions, files);
+    recentHost.replaceChildren(card);
+  } else {
+    recentHost.replaceChildren();
+  }
+}
+
 function renderAgentFilter(entries) {
   const select = $('agent-change-filter');
   const agents = [...new Map(entries.filter(item => item.agentTouch).map(item => [item.agentTouch.sessionId, item.agentTouch])).values()];
@@ -393,8 +578,7 @@ function renderAgentFilter(entries) {
 function renderChanges() {
   const entries = state.changes;
   const filtered = entries.filter(matchesFilter);
-  const pending = pendingOperations();
-  const workspaceReview = renderWorkspaceReview();
+  renderWorkspaceReview();
   renderAgentFilter(entries);
   $('change-count').textContent = entries.length;
   $('filter-all-count').textContent = entries.length;
@@ -406,16 +590,16 @@ function renderChanges() {
   $('change-summary-sub').textContent = state.gitError
     ? (notRepo ? 'This environment is not a Git repository.' : 'Git status could not be read for this environment.')
     : (state.git?.branch ? `${state.git.branch}${state.git.ahead ? ` · ↑${state.git.ahead}` : ''}${state.git.behind ? ` · ↓${state.git.behind}` : ''}` : 'Working tree clean');
+  if (isBasic() && state.gitError) {
+    const recentFiles = state.workspaceReview?.review?.files?.length || 0;
+    $('change-summary-title').textContent = recentFiles ? `ChatGPT edited ${recentFiles} files` : 'Project changes';
+    $('change-summary-sub').textContent = 'Recorded edits and Undo work independently of Git.';
+    $('change-count').textContent = recentFiles;
+  }
   $('status-changes').textContent = `${entries.length} change${entries.length === 1 ? '' : 's'}`;
   const scoped = state.changeFilter !== 'all' || state.agentFilter !== 'all';
-  $('review-button').textContent = pending.length
-    ? `Review ${pending.length} approval${pending.length === 1 ? '' : 's'}`
-    : filtered.length
-      ? `Review ${filtered.length} change${filtered.length === 1 ? '' : 's'}${scoped ? ' visible' : ''}`
-      : workspaceReview
-        ? `Review ${workspaceReview.review?.files?.length || 0} file${workspaceReview.review?.files?.length === 1 ? '' : 's'}`
-        : 'Review';
-  $('review-button').disabled = !filtered.length && !pending.length && !workspaceReview;
+  renderReviewButton();
+  renderReviewCenter();
   const staged = entries.filter(item => item.staged);
   const visibleStaged = filtered.filter(item => item.staged);
   const visibleStageable = filtered.filter(item => item.unstaged || item.untracked);
@@ -444,9 +628,10 @@ function renderChanges() {
       info,
     );
     main.onclick = () => {
+      const sourceMeta = isBasic() ? 'Project changes' : touch ? `${touch.label} · ${touch.tool}` : 'Local / external';
       const action = change.untracked && !change.staged && !change.unstaged
-        ? openFile(change.path, { meta: touch ? `${touch.label} · ${touch.tool}` : 'Local / external' })
-        : openGitDiff(change.path, !change.unstaged && change.staged, { meta: touch ? `${touch.label} · ${touch.tool}` : 'Local / external' });
+        ? openFile(change.path, { meta: sourceMeta })
+        : openGitDiff(change.path, !change.unstaged && change.staged, { meta: sourceMeta });
       void action.catch(error => setStatus(error.message));
     };
     const actions = el('div', undefined, 'change-actions');
@@ -525,12 +710,14 @@ function renderApprovals() {
     const head = el('div', undefined, 'approval-card-head');
     const owner = operation.sessionId ? agentLabel(operation.sessionId) : 'Local / external';
     const task = taskForOperation(operation);
-    head.append(el('strong', operation.tool), el('span', `${task?.title || 'Workspace task'} · ${owner} · ${operation.review?.files?.length || operation.changes?.length || 0} files`));
+    head.append(el('strong', approvalLabel(operation)), el('span', `${isBasic() ? '' : `${task?.title || 'Workspace task'} · ${owner} · `}${operation.review?.files?.length || operation.changes?.length || 0} files`));
     card.append(head, el('p', operation.review ? `+${operation.review.additions || 0} −${operation.review.deletions || 0} · awaiting approval` : `${owner} · awaiting approval`));
     card.onclick = () => void openOperationReview(operation.id).catch(error => setStatus(error.message));
     return card;
   });
   $('approvals-list').replaceChildren(...connectionCards, ...operationCards);
+  renderReviewButton();
+  renderReviewCenter();
 }
 
 export async function loadConnections() {
@@ -546,6 +733,45 @@ export async function decideConnection(id, approve) {
   setStatus(approve ? 'ChatGPT connection accepted' : 'ChatGPT connection rejected');
 }
 
+export function openReviewCenter() {
+  if (isBasic() && !pendingOperations().length && !state.connections?.length && state.workspaceReview?.id && !state.changes.length) {
+    void openChangeSetReview(state.workspaceReview.id).catch(error => setStatus(error.message));
+    return;
+  }
+  renderReviewButton();
+  renderReviewCenter();
+  const center = $('review-center');
+  center.hidden = false;
+  center.setAttribute('aria-hidden', 'false');
+}
+
+export function closeReviewCenter() {
+  const center = $('review-center');
+  if (!center) return;
+  center.hidden = true;
+  center.setAttribute('aria-hidden', 'true');
+}
+
+export function setReviewCenterFilter(filter) {
+  state.reviewCenterFilter = ['all', 'unstaged', 'staged', 'untracked'].includes(filter) ? filter : 'all';
+  renderReviewCenter();
+}
+
+export async function reviewNextChange() {
+  const filtered = state.changes.filter(reviewCenterMatches);
+  const next = filtered.find(change => !state.reviewedChanges.has(reviewedChangeKey(change.path))) || filtered[0];
+  if (!next) return;
+  await openReviewCenterChange(next);
+}
+
+export async function stageReviewedChanges() {
+  const files = state.changes
+    .filter(change => state.reviewedChanges.has(reviewedChangeKey(change.path)) && (change.unstaged || change.untracked))
+    .map(change => change.path);
+  if (!files.length) return;
+  await stageFiles(files);
+}
+
 function currentExecution() {
   const task = state.data?.tasks?.find(item => item.id === state.taskId);
   return task?.execution || { mode: 'local', path: task?.workspace || '' };
@@ -553,40 +779,94 @@ function currentExecution() {
 
 function renderEnvironment() {
   const execution = currentExecution();
-  const changes = state.changes.length;
+  const entries = state.changes;
+  const changes = entries.length;
+  const staged = entries.filter(change => change.staged).length;
+  const working = entries.filter(change => change.unstaged || change.untracked).length;
+  const ahead = Number(state.git?.ahead || 0);
+  const behind = Number(state.git?.behind || 0);
+  const upstream = typeof state.git?.upstream === 'string' ? state.git.upstream : '';
   const branchButton = $('environment-branch');
+  const changesButton = $('environment-changes');
   const primary = $('environment-primary-action');
+  const status = $('environment-status');
+  const syncState = $('environment-sync-state');
   $('environment-change-count').textContent = changes;
+  $('environment-change-label').textContent = changes === 1 ? 'change' : 'changes';
+  $('environment-change-meta').textContent = changes
+    ? [working ? `${working} working` : '', staged ? `${staged} staged` : ''].filter(Boolean).join(' · ')
+    : 'Clean working tree';
+  changesButton.disabled = !state.taskId || changes === 0;
+  changesButton.title = changes ? 'Open these changes in Review Center' : 'Working tree clean';
   $('environment-mode').textContent = execution.mode === 'worktree' ? 'Worktree' : 'Local';
-  $('environment-path').textContent = execution.mode === 'worktree' ? (execution.startingRef ? `from ${execution.startingRef}` : 'isolated') : 'project checkout';
+  $('environment-path').textContent = execution.mode === 'worktree'
+    ? (execution.startingRef ? `isolated · from ${execution.startingRef}` : 'isolated worktree')
+    : 'project checkout';
   $('environment-path').title = execution.path || '';
 
-  branchButton.classList.toggle('source-error', Boolean(state.gitError));
   branchButton.disabled = Boolean(state.gitError) || !state.taskId;
-  if (state.gitError) $('environment-branch-name').textContent = 'Source control unavailable';
-  else if (state.git?.branch) $('environment-branch-name').textContent = state.git.branch;
-  else if (execution.mode === 'worktree') $('environment-branch-name').textContent = `Based on ${execution.startingRef || 'HEAD'}`;
-  else $('environment-branch-name').textContent = 'Detached HEAD';
+  status.classList.remove('warning', 'error');
+  status.textContent = 'Ready';
 
   primary.classList.remove('ready');
   primary.disabled = true;
+  primary.dataset.action = '';
   $('environment-sync-meta').textContent = '';
   if (!state.taskId) {
-    $('environment-primary-label').textContent = 'Commit or push';
+    status.textContent = 'No task';
+    status.classList.add('warning');
+    $('environment-branch-name').textContent = 'No task selected';
+    syncState.textContent = '—';
+    $('environment-sync-meta').textContent = 'Select a task first';
+    $('environment-primary-label').textContent = 'Select a task to continue';
     return;
   }
   if (state.gitError) {
     if (/not a git repository/i.test(state.gitError)) {
+      status.textContent = 'Git not initialized';
+      status.classList.add('warning');
+      $('environment-branch-name').textContent = 'No repository';
+      syncState.textContent = 'Not initialized';
+      $('environment-sync-meta').textContent = 'Git required';
       $('environment-primary-label').textContent = 'Initialize Git';
       primary.disabled = false;
       primary.classList.add('ready');
       primary.dataset.action = 'init';
     } else {
+      status.textContent = 'Source error';
+      status.classList.add('error');
+      $('environment-branch-name').textContent = 'Source control unavailable';
+      syncState.textContent = 'Unavailable';
+      $('environment-sync-meta').textContent = 'Refresh to retry';
       $('environment-primary-label').textContent = 'Source control unavailable';
-      primary.dataset.action = '';
     }
     return;
   }
+
+  if (state.git?.branch) $('environment-branch-name').textContent = state.git.branch;
+  else if (execution.mode === 'worktree') $('environment-branch-name').textContent = `Based on ${execution.startingRef || 'HEAD'}`;
+  else $('environment-branch-name').textContent = 'Detached HEAD';
+
+  if (!state.git?.branch) {
+    syncState.textContent = 'Detached';
+    $('environment-sync-meta').textContent = 'No branch sync';
+  } else if (behind && ahead) {
+    syncState.textContent = `↓${behind} pull · ↑${ahead} push`;
+    $('environment-sync-meta').textContent = upstream || 'remote changes diverged';
+  } else if (behind) {
+    syncState.textContent = `${behind} to pull`;
+    $('environment-sync-meta').textContent = upstream || state.git.branch;
+  } else if (ahead) {
+    syncState.textContent = `${ahead} to push`;
+    $('environment-sync-meta').textContent = upstream || state.git.branch;
+  } else if (upstream) {
+    syncState.textContent = 'Up to date';
+    $('environment-sync-meta').textContent = upstream;
+  } else {
+    syncState.textContent = 'Local branch';
+    $('environment-sync-meta').textContent = 'No upstream';
+  }
+
   if (changes) {
     $('environment-primary-label').textContent = `Review ${changes} change${changes === 1 ? '' : 's'}`;
     primary.disabled = false;
@@ -594,22 +874,21 @@ function renderEnvironment() {
     primary.dataset.action = 'review';
     return;
   }
-  if ((state.git?.behind || 0) > 0 && state.git?.branch) {
-    $('environment-primary-label').textContent = `Pull ${state.git.behind} commit${state.git.behind === 1 ? '' : 's'}`;
+  if (behind > 0 && state.git?.branch) {
+    $('environment-primary-label').textContent = `Pull ${behind} commit${behind === 1 ? '' : 's'}`;
     primary.disabled = false;
     primary.classList.add('ready');
     primary.dataset.action = 'pull';
     return;
   }
-  if ((state.git?.ahead || 0) > 0 && state.git?.branch) {
-    $('environment-primary-label').textContent = `Push ${state.git.ahead} commit${state.git.ahead === 1 ? '' : 's'}`;
+  if (ahead > 0 && state.git?.branch) {
+    $('environment-primary-label').textContent = `Push ${ahead} commit${ahead === 1 ? '' : 's'}`;
     primary.disabled = false;
     primary.classList.add('ready');
     primary.dataset.action = 'push';
     return;
   }
-  $('environment-primary-label').textContent = 'Up to date';
-  primary.dataset.action = '';
+  $('environment-primary-label').textContent = state.git?.branch ? 'Environment ready' : 'Detached environment';
 }
 
 function normalizedFsPath(value) {
@@ -630,7 +909,12 @@ function renderBranchDialog() {
     const inUse = !branch.current ? worktreeForBranch(branch.name) : null;
     const row = el('button', undefined, `branch-row${branch.current ? ' current' : ''}`);
     row.type = 'button';
-    row.disabled = Boolean(branch.current || branch.remote || inUse);
+    // Do not add Workbench-specific branch locks here. The ChatGPT session is
+    // pinned to its Task/worktree, so changing the branch viewed by the user
+    // must not affect that agent. Let Git itself decide whether a particular
+    // switch is legal (for example, Git may reject a branch checked out in a
+    // different worktree).
+    row.disabled = Boolean(branch.current || branch.remote);
     const marker = el('span', branch.current ? '✓' : ' ', 'branch-row-marker');
     const copy = el('span', undefined, 'branch-row-copy');
     copy.append(el('strong', branch.name));
@@ -674,9 +958,6 @@ export async function openBranchDialog() {
 }
 
 export async function switchBranch(name) {
-  if (state.changes.length) throw new Error('Review, commit, stash, or discard current changes before switching branches.');
-  const inUse = worktreeForBranch(name);
-  if (inUse) throw new Error(`${name} is already checked out in another worktree.`);
   await runGitMutation('git_branch', { action: 'switch', name }, `Switching to ${name}`);
   $('branch-dialog').close();
 }
@@ -686,7 +967,6 @@ export async function createBranch() {
   if (name === null) return;
   const value = name.trim();
   if (!value) throw new Error('Branch name is required.');
-  if (state.changes.length) throw new Error('Review, commit, stash, or discard current changes before creating a branch here.');
   await runGitMutation('git_branch', { action: 'create-and-switch', name: value }, `Creating ${value}`);
   $('branch-dialog').close();
 }
@@ -702,8 +982,7 @@ export async function fetchBranches() {
 export async function runEnvironmentPrimaryAction() {
   const action = $('environment-primary-action').dataset.action;
   if (action === 'review') {
-    showChangesTab('changes');
-    document.querySelector('.changes-rail')?.scrollIntoView({ block: 'nearest' });
+    openReviewCenter();
     return;
   }
   if (action === 'init') {
@@ -725,10 +1004,16 @@ export async function runEnvironmentPrimaryAction() {
 
 export async function loadChanges() {
   if (!state.taskId) {
+    state.git = null;
+    state.gitOverview = null;
+    state.gitError = null;
+    state.changes = [];
+    state.changeByPath = new Map();
     state.workspaceReview = null;
     state.workspaceReviewId = null;
     state.workspaceReviewExpanded = false;
-    renderWorkspaceReview();
+    renderChanges();
+    renderApprovals();
     return;
   }
   try {
@@ -811,7 +1096,7 @@ export async function openOperationReview(id) {
   state.currentOperationTaskId = operation.status === 'pending' ? operation.taskId : null;
   const files = operation.review?.files || [];
   const operationTask = taskForOperation(operation);
-  $('review-title').textContent = `${operationTask?.title || 'Workspace task'} · ${operation.tool} · ${files.length || operation.changes?.length || 0} files`;
+  $('review-title').textContent = isBasic() ? `${actionLabel(operation)} · ${files.length} files` : `${operationTask?.title || 'Workspace task'} · ${operation.tool} · ${files.length || operation.changes?.length || 0} files`;
   const owner = operation.sessionId ? agentLabel(operation.sessionId) : 'Local / external';
   const reviewNote = $('review-note');
   const additions = operation.review?.additions || 0;
@@ -843,6 +1128,11 @@ export async function openOperationReview(id) {
     return block;
   });
   $('review-files').replaceChildren(...blocks);
+  if (operation.status === 'pending' && operation.args) {
+    const request = el('pre', undefined, 'approval-request');
+    request.textContent = operation.args.command || JSON.stringify(operation.args, (key, value) => ['content', 'patch'].includes(key) ? undefined : value, 2);
+    if (request.textContent && request.textContent !== '{}') $('review-files').prepend(request);
+  }
   if (!blocks.length) $('review-files').append(el('p', 'Operation này không có text diff để hiển thị.', 'empty-copy'));
   $('review-actions').hidden = operation.status !== 'pending';
   $('review-dialog').showModal();
@@ -855,7 +1145,7 @@ export async function openOperationReview(id) {
   }));
 }
 
-async function openChangeSetReview(id) {
+export async function openChangeSetReview(id) {
   const changeSet = await api(`/api/workbench/change-sets/${encodeURIComponent(id)}`);
   state.currentOperationId = null;
   state.currentOperationTaskId = null;
@@ -864,10 +1154,10 @@ async function openChangeSetReview(id) {
   const owner = changeSet.sessionId ? agentLabel(changeSet.sessionId) : 'Local / external';
   const additions = changeSet.review?.additions || 0;
   const deletions = changeSet.review?.deletions || 0;
-  $('review-title').textContent = `${task?.title || 'Workspace task'} · ${files.length} file${files.length === 1 ? '' : 's'}`;
+  $('review-title').textContent = `${isBasic() ? (changeSet.sessionId ? 'ChatGPT edits' : 'Your edits') : task?.title || 'Workspace task'} · ${files.length} file${files.length === 1 ? '' : 's'}`;
   $('review-note').replaceChildren(
     el('strong', owner, 'review-owner'),
-    el('span', `${changeSet.operationCount || 1} operation${changeSet.operationCount === 1 ? '' : 's'} · current change set`, 'review-mode actual'),
+    el('span', isBasic() ? 'Recent work' : `${changeSet.operationCount || 1} operation${changeSet.operationCount === 1 ? '' : 's'} · current change set`, 'review-mode actual'),
     el('span', `+${additions}`, 'review-additions'),
     el('span', `−${deletions}`, 'review-deletions'),
   );
@@ -916,15 +1206,16 @@ async function openChangeSetFileDiff(id, path) {
     path: file.path,
     title: relativeForTask(file.path, taskForOperation(changeSet)),
     content: renderedDiff,
-    meta: `${owner} · change set · +${file.additions || 0} −${file.deletions || 0}`,
+    meta: `${isBasic() ? 'ChatGPT edits' : `${owner} · change set`} · +${file.additions || 0} −${file.deletions || 0}`,
+    preview: true,
   });
 }
 
-async function restoreChangeSet(id, redo) {
+export async function restoreChangeSet(id, redo) {
   const current = state.workspaceReview?.id === id ? state.workspaceReview : null;
   const action = redo ? 'Redo' : 'Undo';
   const count = current?.review?.files?.length || 0;
-  if (!confirm(`${action} this change set${count ? ` (${count} file${count === 1 ? '' : 's'})` : ''}? Workbench will refuse if any edited file no longer matches the recorded state.`)) return;
+  if (!confirm(`${action} ${isBasic() ? 'these edits' : 'this change set'}${count ? ` (${count} file${count === 1 ? '' : 's'})` : ''}? Files changed since these edits will be preserved and reported as a conflict.`)) return;
   const undoButton = $('workspace-review-undo');
   const reviewButton = $('workspace-review-open');
   clearWorkspaceReviewError();
@@ -942,7 +1233,7 @@ async function restoreChangeSet(id, redo) {
     state.workspaceReviewExpanded = false;
     await loadChanges();
     window.dispatchEvent(new CustomEvent('workbench:refresh-request', { detail: { scopes: ['operations'], taskId } }));
-    setStatus(redo ? 'Workspace change set redone' : 'Workspace change set undone');
+    setStatus(isBasic() ? (redo ? 'Edits redone' : 'Edits undone') : (redo ? 'Workspace change set redone' : 'Workspace change set undone'));
   } catch (error) {
     renderWorkspaceReview();
     showWorkspaceReviewError(error);
@@ -979,14 +1270,8 @@ export async function decideCurrentOperation(approve) {
 }
 
 export function openPrimaryReview() {
-  const pending = pendingOperations();
-  if (pending.length) return openOperationReview(pending[0].id);
-  const change = state.changes.find(matchesFilter);
-  if (!change) return state.workspaceReview ? openChangeSetReview(state.workspaceReview.id) : Promise.resolve();
-  const meta = change.agentTouch ? `${change.agentTouch.label} · ${change.agentTouch.tool}` : 'Local / external';
-  return change.untracked && !change.staged && !change.unstaged
-    ? openFile(change.path, { meta })
-    : openGitDiff(change.path, !change.unstaged && change.staged, { meta });
+  openReviewCenter();
+  return Promise.resolve();
 }
 
 export function setChangeFilter(filter) {

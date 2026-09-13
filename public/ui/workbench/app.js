@@ -1,17 +1,24 @@
-import { api, getAdminToken, setAdminToken } from './api.js';
-import { state, currentTask, currentWorkspace, resetTaskView } from './state.js';
+import { api } from './api.js';
+import { state, currentTask, currentWorkspace, isBasic, resetTaskView } from './state.js';
+import { renderExperience, setupExperience } from './experience.js';
 import { $, basename, el, setStatus } from './dom.js';
-import { loadTree, collapseTree, searchWorkspace } from './explorer.js';
 import { hasUnsavedEditorChanges, reconcileEditorState, reloadActiveEditor, resetEditor, saveActiveEditor } from './editor.js';
-import { commitStaged, createBranch, decideCurrentOperation, fetchBranches, loadChanges, loadConnections, openBranchDialog, openPrimaryReview, runEnvironmentPrimaryAction, setAgentFilter, setChangeFilter, showChangesTab, stageAllChanges, unstageAllChanges } from './changes.js';
+import { closeReviewCenter, commitStaged, createBranch, decideCurrentOperation, fetchBranches, loadChanges, loadConnections, openBranchDialog, openReviewCenter, reviewNextChange, runEnvironmentPrimaryAction, setAgentFilter, setChangeFilter, setReviewCenterFilter, showChangesTab, stageAllChanges, stageReviewedChanges, unstageAllChanges } from './changes.js';
 import { loadAgents } from './agents.js';
+import { loadIntegrationQueue, openIntegrationQueue, saveIntegrationDependencies } from './integration.js';
 import { createCheckpoint, loadHistory, restoreCurrentCheckpoint } from './history.js';
 import { loadProcesses, resetProcessConsole, setupProcessConsole } from './terminal.js';
+import { setupChatSessions } from './chat-sessions.js';
 
 let eventsController;
 let refreshTimer;
 let liveTimer;
 let editingMcpServerId = null;
+let workspaceSourceMode = 'local';
+let folderBrowserTarget = 'local';
+let cloneFolderTouched = false;
+let workspaceDialogMode = 'add';
+let relocationWorkspaceId = null;
 const SYSTEM_ENV_KEYS = [
   'WORKSPACE_PATH',
   'EXTRA_WORKSPACE_PATHS',
@@ -28,11 +35,47 @@ const pendingScopes = new Set();
 const pendingEventTaskIds = new Set();
 
 function modeLabel(mode) {
+  if (isBasic()) return mode === 'full' ? 'No prompts' : mode === 'auto' ? 'Safe edits' : 'Ask first';
   return mode === 'full' ? 'Full' : mode === 'auto' ? 'Auto' : 'Ask';
+}
+
+function taskLifecycleLabel(value) {
+  if (value === 'ready_to_merge') return 'Ready to merge';
+  if (value === 'blocked') return 'Blocked';
+  if (value === 'merged') return 'Merged';
+  if (value === 'completed') return 'Completed';
+  if (value === 'archived') return 'Archived';
+  return 'Open';
+}
+
+function taskAcceptsAgentWork(task) {
+  return task?.lifecycle === 'open' || task?.lifecycle === 'blocked' || !task?.lifecycle;
+}
+
+function taskCanStaySelected(task) {
+  return taskAcceptsAgentWork(task) || task?.lifecycle === 'ready_to_merge';
 }
 
 function workspaceKey(value) {
   return String(value || '').replace(/\\/g, '/').toLowerCase();
+}
+
+function workspaceAvailabilityLabel(workspace) {
+  if (workspace?.availability === 'missing') return 'Missing';
+  if (workspace?.availability === 'unavailable') return 'Unavailable';
+  return 'Ready';
+}
+
+function workspaceIsReady(workspace = currentWorkspace()) {
+  return Boolean(workspace) && (!workspace.availability || workspace.availability === 'ready');
+}
+
+function parentFolderPath(value) {
+  const normalized = String(value || '').replace(/[\\/]+$/, '');
+  const index = Math.max(normalized.lastIndexOf('\\'), normalized.lastIndexOf('/'));
+  if (index < 0) return '';
+  if (/^[A-Za-z]:$/.test(normalized.slice(0, index))) return `${normalized.slice(0, index)}\\`;
+  return normalized.slice(0, index) || normalized;
 }
 
 function selectedPolicyMode() {
@@ -57,19 +100,25 @@ function buildContextTaskRow(task, current = false) {
   const row = el('button', undefined, `context-list-button${current ? ' current' : ''}`);
   row.type = 'button';
   const copy = el('span', undefined, 'context-list-copy');
+  const lifecycle = taskLifecycleLabel(task.lifecycle);
+  const detail = taskAcceptsAgentWork(task)
+    ? `${lifecycle} · ${current ? 'Current task' : 'Switch to this task'}`
+    : `${lifecycle} · integration state`;
   copy.append(
     el('strong', task.title),
-    el('small', current ? 'Current task · used for new ChatGPT sessions' : 'Switch to this task'),
+    el('small', detail),
   );
   row.append(
     el('i', '', 'context-list-marker'),
     copy,
     el('span', modeLabel(task.policy.mode), 'context-list-meta'),
   );
-  row.onclick = () => {
+  const selectable = taskAcceptsAgentWork(task);
+  row.disabled = !selectable;
+  row.onclick = selectable ? () => {
     closeDialog('context-dialog');
     void switchTask(task.id).catch(error => setStatus(error.message));
-  };
+  } : null;
   return row;
 }
 
@@ -95,14 +144,15 @@ function renderContextPanels() {
   const workspaceRows = workspaces.map(item => {
     const current = item.id === state.workspaceId;
     const count = tasks.filter(taskItem => taskItem.workspaceId === item.id || workspaceKey(taskItem.workspace) === workspaceKey(item.path)).length;
-    const row = el('button', undefined, `context-list-button${current ? ' current' : ''}`);
+    const missing = item.availability && item.availability !== 'ready';
+    const row = el('button', undefined, `context-list-button${current ? ' current' : ''}${missing ? ' workspace-missing' : ''}`);
     row.type = 'button';
     const copy = el('span', undefined, 'context-list-copy');
-    copy.append(el('strong', item.name || basename(item.path)), el('small', item.path));
+    copy.append(el('strong', item.name || basename(item.path)), el('small', missing ? `${workspaceAvailabilityLabel(item)} · ${item.path}` : item.path));
     row.append(
-      el('i', '', 'context-list-marker'),
+      el('i', '', `context-list-marker${missing ? ' attention-dot' : ''}`),
       copy,
-      el('span', `${count} task${count === 1 ? '' : 's'}`, 'context-list-meta'),
+      el('span', missing ? workspaceAvailabilityLabel(item) : item.experience === 'basic' ? 'Basic' : `${count} task${count === 1 ? '' : 's'}`, 'context-list-meta'),
     );
     row.onclick = () => {
       closeDialog('context-dialog');
@@ -127,23 +177,35 @@ function renderContextPanels() {
 
   $('settings-workspace-name').textContent = workspaceName;
   $('settings-workspace-path').textContent = workspacePath || '—';
+  const availability = $('settings-workspace-availability');
+  availability.textContent = workspaceAvailabilityLabel(workspace);
+  availability.className = `workspace-availability ${workspace?.availability || 'ready'}`;
+  $('workspace-settings-locate-copy').textContent = workspace?.availability === 'missing'
+    ? 'Project folder was not found. Locate the existing folder to keep this workspace, tasks and history.'
+    : workspace?.availability === 'unavailable'
+      ? 'The project folder is currently unavailable. Choose another existing folder if the project moved.'
+      : 'Change the folder this workspace points to. Files are not moved.';
   $('settings-permission-summary').textContent = task
     ? `${modeLabel(task.policy.mode)} · ${task.policy.workspaceOnly ? 'Restricted to workspace' : 'Machine access allowed'}`
     : 'No task selected';
-  $('workspace-settings-permissions').disabled = !task;
-  $('new-task-button').disabled = !workspace;
+  $('workspace-settings-experience').disabled = !workspaceIsReady(workspace);
+  $('workspace-settings-permissions').disabled = !task || !workspaceIsReady(workspace);
+  $('workspace-settings-locate').disabled = !workspace;
+  $('workspace-settings-remove').disabled = !workspace;
+  $('new-task-button').disabled = !workspaceIsReady(workspace);
 }
 
 function renderHeader() {
+  renderExperience();
   const task = currentTask();
   const workspace = currentWorkspace();
   if (!workspace) {
     $('workspace-name').textContent = 'No workspace';
     $('task-name').textContent = 'Add a workspace';
     $('workspace-path').textContent = 'No workspace selected';
-    $('explorer-root-name').textContent = 'Workspace';
     $('policy-button').textContent = 'Ask';
     $('policy-button').disabled = true;
+    renderTaskBrief();
     renderContextPanels();
     return;
   }
@@ -151,16 +213,40 @@ function renderHeader() {
   $('workspace-name').textContent = workspaceName;
   $('task-name').textContent = task?.title || 'No task';
   $('workspace-path').textContent = workspace.path;
-  $('explorer-root-name').textContent = workspaceName;
   $('status-path').textContent = workspace.path;
-  $('policy-button').disabled = !task;
+  const ready = workspaceIsReady(workspace);
+  $('policy-button').disabled = !task || !ready;
   $('policy-button').textContent = task ? modeLabel(task.policy.mode) : 'No task';
   if (task) {
     setSelectedPolicyMode(task.policy.mode);
     $('policy-scope').checked = task.policy.workspaceOnly;
   }
-  $('status-workspace').replaceChildren(el('i', '', 'dot'), document.createTextNode(`${workspaceName} ready`));
+  const availability = workspaceAvailabilityLabel(workspace);
+  $('status-workspace').replaceChildren(
+    el('i', '', `dot${ready ? '' : ' attention-dot'}`),
+    document.createTextNode(ready ? `${workspaceName} ready` : `${workspaceName} ${availability.toLowerCase()}`),
+  );
+  renderTaskBrief();
   renderContextPanels();
+}
+
+function renderTaskBrief() {
+  const task = currentTask();
+  const description = $('task-description');
+  const handoffCard = $('task-handoff-card');
+  const handoffButton = $('task-handoff-edit');
+  if (!description || !handoffCard || !handoffButton) return;
+  description.textContent = task?.description || 'Add a description so every agent starts with the same scope.';
+  $('task-brief-edit').disabled = !task;
+  handoffButton.disabled = !task;
+  handoffButton.textContent = task?.handoff ? 'Update handoff' : 'Create handoff';
+  handoffCard.hidden = !task?.handoff;
+  if (!task?.handoff) return;
+  $('task-handoff-summary').textContent = task.handoff.summary;
+  $('task-handoff-time').textContent = new Date(task.handoff.updatedAt).toLocaleString();
+  const items = (task.handoff.nextSteps || []).map(step => el('li', step));
+  $('task-handoff-next').replaceChildren(...items);
+  $('task-handoff-next').hidden = !items.length;
 }
 
 function mcpConfigServer(id) {
@@ -172,15 +258,41 @@ function renderMcpSettings(health) {
   const upstream = health.upstream || [];
   const connected = upstream.filter(server => server.health === 'connected').length;
   const publicUrl = health.public_base_url || '';
-  $('mcp-dialog-server').textContent = `:${health.mcp_port || '—'}`;
+  const chatgpt = health.chatgpt || { status: 'not_connected', connected: false, active_sessions: 0, pending_approvals: 0 };
+  const connectionMode = health.connection_mode || 'local';
+  const modeLabel = connectionMode === 'cloudflare'
+    ? 'Cloudflare Quick Tunnel'
+    : connectionMode === 'openai'
+      ? 'OpenAI Secure Tunnel'
+      : 'Local only';
+  $('mcp-dialog-local-status').textContent = health.status === 'ok' ? 'Ready' : 'Unavailable';
+  $('mcp-dialog-server').textContent = `127.0.0.1:${health.mcp_port || '—'}/mcp`;
   $('mcp-dialog-sessions').textContent = `${health.active_sessions || 0} active session${health.active_sessions === 1 ? '' : 's'}`;
-  $('mcp-dialog-public').textContent = publicUrl ? publicUrl.replace(/^https?:\/\//, '') : 'Local only';
-  $('mcp-dialog-profile').textContent = `${health.tool_profile || 'slim'} tool profile`;
-  $('mcp-dialog-workspace').textContent = currentTask()?.execution?.path || health.default_cwd || currentTask()?.workspace || '—';
-  const bytes = health.instructions?.instruction_bytes;
-  $('mcp-dialog-instructions').textContent = bytes ? `${Math.round(bytes / 1024)} KB injected context` : 'No summary';
-  $('mcp-upstream-count').textContent = `${connected}/${upstream.length} connected`;
-  $('settings-mcp-summary').textContent = `${health.active_sessions || 0} session${health.active_sessions === 1 ? '' : 's'} · ${upstream.length} upstream`;
+  $('mcp-dialog-connection-mode').textContent = modeLabel;
+  const publicUrlNode = $('mcp-dialog-public-url');
+  const showPublicUrl = connectionMode === 'cloudflare' && Boolean(publicUrl);
+  publicUrlNode.hidden = !showPublicUrl;
+  publicUrlNode.textContent = showPublicUrl ? publicUrl : '—';
+  const chatgptDot = $('mcp-dialog-chatgpt-dot');
+  chatgptDot.classList.remove('muted-dot', 'attention-dot');
+  $('mcp-review-connection').hidden = true;
+  if (chatgpt.status === 'connected') {
+    $('mcp-dialog-chatgpt-status').textContent = 'Connected';
+    $('mcp-dialog-chatgpt-detail').textContent = `${chatgpt.active_sessions || 0} active ChatGPT session${chatgpt.active_sessions === 1 ? '' : 's'}`;
+  } else if (chatgpt.status === 'approval_required') {
+    $('mcp-dialog-chatgpt-status').textContent = 'Approval required';
+    $('mcp-dialog-chatgpt-detail').textContent = `${chatgpt.pending_approvals || 1} connection request${chatgpt.pending_approvals === 1 ? '' : 's'} waiting for approval.`;
+    chatgptDot.classList.add('attention-dot');
+    $('mcp-review-connection').hidden = false;
+  } else {
+    $('mcp-dialog-chatgpt-status').textContent = 'Not connected';
+    $('mcp-dialog-chatgpt-detail').textContent = connectionMode === 'local'
+      ? 'Local MCP is ready, but no public ChatGPT connection is configured.'
+      : 'Waiting for ChatGPT to connect.';
+    chatgptDot.classList.add('muted-dot');
+  }
+  $('mcp-upstream-count').textContent = upstream.length ? `${connected}/${upstream.length} connected` : 'None configured';
+  $('settings-mcp-summary').textContent = `${chatgpt.connected ? 'ChatGPT connected' : 'ChatGPT not connected'} · ${upstream.length} upstream`;
   $('mcp-state').textContent = 'Online';
   $('mcp-dot').classList.remove('muted-dot');
   const rows = upstream.map(server => {
@@ -406,6 +518,7 @@ function openSystemSettings() {
 }
 
 async function loadWorkbenchState() {
+  const previousTaskId = state.taskId;
   const data = await api('/api/workbench');
   state.data = data;
   const workspaces = data.workspaces || [];
@@ -416,10 +529,17 @@ async function loadWorkbenchState() {
       : workspaces[0]?.id || null;
   }
   const taskInWorkspace = task => task.workspaceId === state.workspaceId;
-  if (!tasks.some(task => task.id === state.taskId && taskInWorkspace(task))) {
-    state.taskId = tasks.some(task => task.id === data.selectedTaskId && taskInWorkspace(task))
+  if (isBasic()) state.taskId = currentWorkspace().basicTaskId || null;
+  const selectableTaskInWorkspace = task => taskInWorkspace(task) && taskAcceptsAgentWork(task);
+  if (!tasks.some(task => task.id === state.taskId && taskInWorkspace(task) && taskCanStaySelected(task))) {
+    state.taskId = tasks.some(task => task.id === data.selectedTaskId && selectableTaskInWorkspace(task))
       ? data.selectedTaskId
-      : tasks.find(taskInWorkspace)?.id || null;
+      : tasks.find(selectableTaskInWorkspace)?.id || null;
+  }
+  if (previousTaskId && state.taskId !== previousTaskId && !hasUnsavedEditorChanges()) {
+    resetTaskView();
+    resetEditor();
+    resetProcessConsole();
   }
   reconcileEditorState();
   return data;
@@ -429,32 +549,51 @@ async function fullRefresh() {
   setStatus('Refreshing…');
   const data = await loadWorkbenchState();
   renderHeader();
-  await loadConnections();
+  const workspace = currentWorkspace();
+  if (workspace && !workspaceIsReady(workspace)) {
+    resetTaskView();
+    resetEditor();
+    resetProcessConsole();
+    closeReviewCenter();
+    await Promise.allSettled([loadConnections(), loadMcpSettings(), state.taskId ? loadProcesses() : Promise.resolve()]);
+    renderHeader();
+    setStatus(workspace.availability === 'missing'
+      ? `Project folder missing · locate ${workspace.name || basename(workspace.path)} to continue`
+      : `Project folder unavailable · check ${workspace.path}`);
+    return data;
+  }
+  await Promise.all([loadConnections(), isBasic() ? Promise.resolve() : loadIntegrationQueue()]);
   if (!state.taskId) {
     resetProcessConsole();
     await loadAgents();
-    setStatus('Create a task to start');
+    setStatus(currentWorkspace() ? 'Create a task to start' : 'Add a project folder to start');
     return;
   }
   await Promise.allSettled([loadAgents(), loadMcpSettings()]);
   await loadChanges();
   renderHeader();
-  await Promise.allSettled([loadTree(), loadHistory(), loadProcesses()]);
+  await Promise.allSettled([loadHistory(), loadProcesses()]);
   renderHeader();
   setStatus('Ready');
 }
 
-async function connect(token) {
-  setAdminToken(token);
+async function connect() {
   await fullRefresh();
   state.connected = true;
-  sessionStorage.setItem('local-coder-admin-token', getAdminToken());
-  $('connect-overlay').hidden = true;
   startEvents();
   clearInterval(liveTimer);
   liveTimer = setInterval(() => {
     if (!state.connected) return;
-    void Promise.allSettled([loadAgents(), loadProcesses(), loadConnections()]).then(renderHeader);
+    const before = currentWorkspace()?.availability || 'ready';
+    void loadWorkbenchState().then(() => {
+      const after = currentWorkspace()?.availability || 'ready';
+      if (before !== after) return fullRefresh();
+      if (!workspaceIsReady()) {
+        renderHeader();
+        return Promise.allSettled([loadConnections(), state.taskId ? loadProcesses() : Promise.resolve()]);
+      }
+      return Promise.allSettled([loadAgents(), loadProcesses(), loadConnections()]).then(renderHeader);
+    }).catch(error => setStatus(error.message));
   }, 15000);
 }
 
@@ -467,9 +606,18 @@ async function refreshTypedScopes(scopes, eventTaskIds) {
     return;
   }
   if (needsState) await loadWorkbenchState();
+  if (currentWorkspace() && !workspaceIsReady()) {
+    renderHeader();
+    resetTaskView();
+    resetEditor();
+    resetProcessConsole();
+    await Promise.allSettled([loadConnections(), state.taskId ? loadProcesses() : Promise.resolve()]);
+    setStatus(currentWorkspace().availability === 'missing' ? 'Project folder missing · use Locate folder' : 'Project folder unavailable');
+    return;
+  }
   if (!state.taskId) {
     renderHeader();
-    await loadAgents();
+    await Promise.all([loadAgents(), loadIntegrationQueue()]);
     return;
   }
   const workspaceTaskIds = new Set((state.data?.tasks || [])
@@ -478,10 +626,10 @@ async function refreshTypedScopes(scopes, eventTaskIds) {
   const affectsCurrentWorkspace = !eventTaskIds?.size || [...eventTaskIds].some(taskId => workspaceTaskIds.has(taskId));
   const jobs = [];
   if (scopes.has('workspaces') || scopes.has('tasks') || scopes.has('operations')) jobs.push(loadAgents());
+  if (affectsCurrentWorkspace && (scopes.has('workspaces') || scopes.has('tasks') || scopes.has('workspace'))) jobs.push(loadIntegrationQueue());
   if (affectsCurrentWorkspace && (scopes.has('operations') || scopes.has('workspace'))) jobs.push(loadChanges());
   if (affectsCurrentTask && (scopes.has('operations') || scopes.has('workspace'))) jobs.push(loadProcesses());
   if (affectsCurrentWorkspace && (scopes.has('operations') || scopes.has('checkpoints'))) jobs.push(loadHistory());
-  if (affectsCurrentTask && scopes.has('workspace')) jobs.push(loadTree());
   await Promise.allSettled(jobs);
   renderHeader();
   setStatus('Ready');
@@ -507,7 +655,7 @@ async function startEvents() {
   eventsController = new AbortController();
   try {
     const response = await fetch('/api/workbench/events', {
-      headers: { Authorization: `Bearer ${getAdminToken()}` },
+      credentials: 'same-origin',
       signal: eventsController.signal,
     });
     if (!response.ok) throw new Error('Live updates unavailable');
@@ -560,12 +708,74 @@ async function switchWorkspace(workspaceId) {
   setStatus(currentTask() ? 'Workspace and task selected for new ChatGPT sessions' : 'Workspace selected · create a task to start');
 }
 
+async function removeCurrentWorkspace() {
+  const workspace = currentWorkspace();
+  if (!workspace) return;
+  if (hasUnsavedEditorChanges() && !confirm('Remove this workspace and discard unsaved or pending editor buffers? Project files already saved on disk will not be deleted.')) return;
+  const taskCount = (state.data?.tasks || []).filter(task => task.workspaceId === workspace.id).length;
+  const name = workspace.name || basename(workspace.path);
+  const confirmed = confirm(
+    `Remove "${name}" from Workbench?\n\n`
+    + `This removes ${taskCount} task${taskCount === 1 ? '' : 's'} and saved Workbench history for this workspace.\n`
+    + `Project files at ${workspace.path} will NOT be deleted.\n\n`
+    + 'This Workbench metadata removal cannot be undone.'
+  );
+  if (!confirmed) return;
+  const errorTarget = $('workspace-remove-error');
+  errorTarget.hidden = true;
+  const button = $('workspace-settings-remove');
+  button.disabled = true;
+  button.textContent = 'Removing…';
+  try {
+    const result = await api(`/api/workbench/workspaces/${encodeURIComponent(workspace.id)}`, { method: 'DELETE', body: {} });
+    closeDialog('workspace-settings-dialog');
+    state.workspaceId = result.selectedWorkspaceId || null;
+    state.taskId = result.selectedTaskId || null;
+    resetTaskView();
+    resetEditor();
+    resetProcessConsole();
+    await fullRefresh();
+    setStatus(`${name} removed from Workbench · project files kept on disk`);
+  } catch (error) {
+    errorTarget.textContent = error.message;
+    errorTarget.hidden = false;
+    setStatus(error.message);
+  } finally {
+    button.textContent = 'Remove';
+    button.disabled = !currentWorkspace();
+  }
+}
+
 function folderBrowserRow(name, path) {
   const button = el('button', undefined, 'folder-browser-row');
   button.type = 'button';
   button.append(el('span', '▱', 'folder-browser-icon'), el('strong', name), el('code', path));
   button.onclick = () => void loadFolderBrowser(path).catch(error => showWorkspaceError(error));
   return button;
+}
+
+function inferCloneFolderName(repository) {
+  const trimmed = String(repository || '').trim().replace(/[\\/]+$/, '');
+  const tail = trimmed.split(/[\\/:]/).filter(Boolean).pop() || '';
+  return tail.replace(/\.git$/i, '');
+}
+
+function setWorkspaceSourceMode(mode) {
+  workspaceSourceMode = mode === 'clone' ? 'clone' : 'local';
+  const cloning = workspaceSourceMode === 'clone';
+  $('workspace-local-panel').hidden = cloning;
+  $('workspace-clone-panel').hidden = !cloning;
+  $('workspace-source-local').classList.toggle('active', !cloning);
+  $('workspace-source-clone').classList.toggle('active', cloning);
+  $('workspace-source-local').setAttribute('aria-selected', String(!cloning));
+  $('workspace-source-clone').setAttribute('aria-selected', String(cloning));
+  $('create-workspace').textContent = cloning ? 'Clone & Open' : 'Add workspace';
+  $('workspace-safety-copy').textContent = cloning
+    ? 'Workbench clones with your existing Git credentials, then registers the new folder. Removing the workspace later will not delete the cloned project.'
+    : 'This only registers the folder in Local Coder. Your project files are not moved or deleted.';
+  $('folder-browser').hidden = true;
+  $('add-workspace-error').hidden = true;
+  queueMicrotask(() => (cloning ? $('clone-workspace-repository') : $('add-workspace-path')).focus());
 }
 
 function showWorkspaceError(error) {
@@ -589,35 +799,73 @@ async function loadFolderBrowser(requestedPath = '') {
   $('folder-browser-list').replaceChildren(...rows);
   if (!rows.length) $('folder-browser-list').append(el('p', 'No subfolders found.', 'empty-copy'));
   if (result.path) {
-    $('add-workspace-path').value = result.path;
-    if (!$('add-workspace-name').value.trim()) $('add-workspace-name').value = basename(result.path);
+    if (folderBrowserTarget === 'clone') {
+      $('clone-workspace-parent').value = result.path;
+    } else {
+      $('add-workspace-path').value = result.path;
+      if (workspaceDialogMode !== 'relocate' && !$('add-workspace-name').value.trim()) $('add-workspace-name').value = basename(result.path);
+    }
   }
 }
 
 function openAddWorkspaceDialog() {
+  workspaceDialogMode = 'add';
+  relocationWorkspaceId = null;
+  $('add-workspace-heading').textContent = 'Add workspace';
+  $('add-workspace-subtitle').textContent = 'Open a local project folder or clone a Git repository.';
+  $('workspace-source-tabs').hidden = false;
+  $('workspace-name-field').hidden = false;
   $('add-workspace-path').value = '';
+  $('clone-workspace-repository').value = '';
+  $('clone-workspace-parent').value = '';
+  $('clone-workspace-folder').value = '';
+  $('clone-workspace-branch').value = '';
   $('add-workspace-name').value = '';
+  cloneFolderTouched = false;
+  folderBrowserTarget = 'local';
   $('add-workspace-error').hidden = true;
   $('folder-browser').hidden = true;
   $('folder-browser-list').replaceChildren(el('p', 'Choose a drive or folder.', 'empty-copy'));
+  setWorkspaceSourceMode('local');
   $('add-workspace-dialog').showModal();
   queueMicrotask(() => $('add-workspace-path').focus());
 }
 
+function openRelocateWorkspaceDialog(workspace) {
+  if (!workspace) return;
+  workspaceDialogMode = 'relocate';
+  relocationWorkspaceId = workspace.id;
+  workspaceSourceMode = 'local';
+  folderBrowserTarget = 'local';
+  cloneFolderTouched = false;
+  $('add-workspace-heading').textContent = workspace.availability === 'missing' ? 'Locate project folder' : 'Change project folder';
+  $('add-workspace-subtitle').textContent = `Point "${workspace.name || basename(workspace.path)}" to its existing project folder.`;
+  $('workspace-source-tabs').hidden = true;
+  $('workspace-name-field').hidden = true;
+  $('workspace-local-panel').hidden = false;
+  $('workspace-clone-panel').hidden = true;
+  $('add-workspace-path').value = workspace.path || '';
+  $('add-workspace-error').hidden = true;
+  $('folder-browser').hidden = true;
+  $('folder-browser-list').replaceChildren(el('p', 'Choose the existing project folder.', 'empty-copy'));
+  $('workspace-safety-copy').textContent = 'Only the Workbench pointer changes. Tasks and history stay with this workspace; project files are never moved or deleted.';
+  $('create-workspace').textContent = 'Use folder';
+  $('add-workspace-dialog').showModal();
+  const parent = parentFolderPath(workspace.path);
+  if (parent) void loadFolderBrowser(parent).catch(() => {});
+  queueMicrotask(() => $('add-workspace-path').focus());
+}
+
 function setupEvents() {
+  setupExperience(fullRefresh);
   setupProcessConsole();
-  $('connect-form').onsubmit = event => {
-    event.preventDefault();
-    const token = $('token').value.trim();
-    $('connection-error').hidden = true;
-    void connect(token).catch(error => {
-      $('connection-error').textContent = error.message;
-      $('connection-error').hidden = false;
-    });
-  };
   $('context-button').onclick = () => { renderContextPanels(); $('context-dialog').showModal(); };
-  $('settings-button').onclick = () => { renderContextPanels(); $('workspace-settings-dialog').showModal(); };
+  $('settings-button').onclick = () => { renderContextPanels(); $('workspace-remove-error').hidden = true; $('workspace-settings-dialog').showModal(); };
   $('mcp-button').onclick = () => void loadMcpSettings().then(() => $('mcp-dialog').showModal()).catch(error => setStatus(error.message));
+  $('chatgpt-button').onclick = () => void loadMcpSettings().then(() => $('mcp-dialog').showModal()).catch(error => setStatus(error.message));
+  $('integration-button').onclick = () => void openIntegrationQueue().catch(error => setStatus(error.message));
+  $('integration-refresh').onclick = () => void loadIntegrationQueue().catch(error => setStatus(error.message));
+  $('integration-dependency-save').onclick = () => void saveIntegrationDependencies().catch(error => setStatus(error.message));
   $('policy-button').onclick = () => { renderHeader(); $('permissions-dialog').showModal(); };
   $('context-open-settings').onclick = () => {
     closeDialog('context-dialog');
@@ -641,7 +889,18 @@ function setupEvents() {
     closeDialog('workspace-settings-dialog');
     openSystemSettings();
   };
+  $('workspace-settings-locate').onclick = () => {
+    const workspace = currentWorkspace();
+    if (!workspace) return;
+    closeDialog('workspace-settings-dialog');
+    openRelocateWorkspaceDialog(workspace);
+  };
+  $('workspace-settings-remove').onclick = () => void removeCurrentWorkspace();
   $('refresh-mcp-settings').onclick = () => void loadMcpSettings().catch(error => setStatus(error.message));
+  $('mcp-review-connection').onclick = () => {
+    closeDialog('mcp-dialog');
+    openSystemSettings();
+  };
   $('mcp-open-system').onclick = () => {
     closeDialog('mcp-dialog');
     openSystemSettings();
@@ -671,75 +930,155 @@ function setupEvents() {
     closeDialog('context-dialog');
     openAddWorkspaceDialog();
   };
-  $('browse-workspace').onclick = () => void loadFolderBrowser($('add-workspace-path').value.trim()).catch(error => {
-    if ($('add-workspace-path').value.trim()) showWorkspaceError(error);
-    else void loadFolderBrowser('').catch(showWorkspaceError);
-  });
+  $('workspace-source-local').onclick = () => setWorkspaceSourceMode('local');
+  $('workspace-source-clone').onclick = () => setWorkspaceSourceMode('clone');
+  $('browse-workspace').onclick = () => {
+    folderBrowserTarget = 'local';
+    const requested = $('add-workspace-path').value.trim();
+    void loadFolderBrowser(requested).catch(error => {
+      if (workspaceDialogMode === 'relocate' && requested) {
+        const parent = parentFolderPath(requested);
+        if (parent && parent !== requested) {
+          void loadFolderBrowser(parent).catch(showWorkspaceError);
+          return;
+        }
+      }
+      if (requested) showWorkspaceError(error);
+      else void loadFolderBrowser('').catch(showWorkspaceError);
+    });
+  };
+  $('browse-clone-parent').onclick = () => {
+    folderBrowserTarget = 'clone';
+    void loadFolderBrowser($('clone-workspace-parent').value.trim()).catch(error => {
+      if ($('clone-workspace-parent').value.trim()) showWorkspaceError(error);
+      else void loadFolderBrowser('').catch(showWorkspaceError);
+    });
+  };
   $('folder-browser-up').onclick = () => void loadFolderBrowser($('folder-browser-up').dataset.parent || '').catch(showWorkspaceError);
   $('use-current-folder').onclick = () => {
-    if (!$('add-workspace-path').value.trim()) return;
+    const selectedPath = folderBrowserTarget === 'clone' ? $('clone-workspace-parent').value.trim() : $('add-workspace-path').value.trim();
+    if (!selectedPath) return;
     $('folder-browser').hidden = true;
     $('add-workspace-error').hidden = true;
-    if (!$('add-workspace-name').value.trim()) $('add-workspace-name').value = basename($('add-workspace-path').value.trim());
-    $('add-workspace-name').focus();
+    if (folderBrowserTarget === 'clone') $('clone-workspace-folder').focus();
+    else if (workspaceDialogMode === 'relocate') $('create-workspace').focus();
+    else {
+      if (!$('add-workspace-name').value.trim()) $('add-workspace-name').value = basename(selectedPath);
+      $('add-workspace-name').focus();
+    }
   };
   $('add-workspace-path').oninput = () => {
     $('add-workspace-error').hidden = true;
     if (!$('add-workspace-name').value.trim()) $('add-workspace-name').placeholder = basename($('add-workspace-path').value.trim() || 'workspace');
   };
+  $('clone-workspace-repository').oninput = () => {
+    $('add-workspace-error').hidden = true;
+    const inferred = inferCloneFolderName($('clone-workspace-repository').value);
+    if (!cloneFolderTouched) $('clone-workspace-folder').value = inferred;
+    if (!$('add-workspace-name').value.trim()) $('add-workspace-name').placeholder = inferred || 'workspace';
+  };
+  $('clone-workspace-folder').oninput = () => { cloneFolderTouched = true; $('add-workspace-error').hidden = true; };
+  $('clone-workspace-parent').oninput = () => { $('add-workspace-error').hidden = true; };
   $('create-workspace').onclick = () => void (async () => {
     const submit = $('create-workspace');
     if (submit.disabled) return;
-    const workspacePath = $('add-workspace-path').value.trim();
     const name = $('add-workspace-name').value.trim();
-    if (!workspacePath) throw new Error('Choose a workspace folder.');
+    const relocating = workspaceDialogMode === 'relocate';
+    const cloning = !relocating && workspaceSourceMode === 'clone';
+    const workspacePath = $('add-workspace-path').value.trim();
+    const repository = $('clone-workspace-repository').value.trim();
+    const destinationParent = $('clone-workspace-parent').value.trim();
+    const folderName = $('clone-workspace-folder').value.trim();
+    const branch = $('clone-workspace-branch').value.trim();
+    if (cloning && !repository) throw new Error('Enter a Git repository URL or path.');
+    if (cloning && !destinationParent) throw new Error('Choose where the repository should be cloned.');
+    if (!cloning && !workspacePath) throw new Error('Choose a workspace folder.');
+    if (relocating && !relocationWorkspaceId) throw new Error('Workspace to relocate is no longer available.');
     $('add-workspace-error').hidden = true;
     submit.disabled = true;
-    submit.textContent = 'Adding…';
+    submit.textContent = relocating ? 'Locating…' : cloning ? 'Cloning…' : 'Adding…';
     let workspace;
     try {
-      workspace = await api('/api/workbench/workspaces', { method: 'POST', body: { name, path: workspacePath } });
-      await api(`/api/workbench/workspaces/${workspace.id}/select`, { method: 'POST', body: {} });
-      state.workspaceId = workspace.id;
-      state.taskId = null;
+      if (relocating) {
+        const result = await api(`/api/workbench/workspaces/${encodeURIComponent(relocationWorkspaceId)}/path`, {
+          method: 'PUT',
+          body: { path: workspacePath },
+        });
+        workspace = result.workspace;
+        state.workspaceId = workspace.id;
+      } else if (cloning) {
+        const result = await api('/api/workbench/workspaces/clone', {
+          method: 'POST',
+          body: { repository, destinationParent, ...(folderName ? { folderName } : {}), ...(branch ? { branch } : {}), name },
+        });
+        workspace = result.workspace;
+        state.workspaceId = result.selectedWorkspaceId || workspace.id;
+        state.taskId = result.selectedTaskId || null;
+      } else {
+        workspace = await api('/api/workbench/workspaces', { method: 'POST', body: { name, path: workspacePath } });
+        await api(`/api/workbench/workspaces/${workspace.id}/select`, { method: 'POST', body: {} });
+        state.workspaceId = workspace.id;
+        state.taskId = null;
+      }
       resetTaskView();
       resetEditor();
       resetProcessConsole();
       $('add-workspace-dialog').close();
     } finally {
       submit.disabled = false;
-      submit.textContent = 'Add workspace';
+      submit.textContent = relocating ? 'Use folder' : workspaceSourceMode === 'clone' ? 'Clone & Open' : 'Add workspace';
     }
     try {
       await fullRefresh();
-      setStatus('Workspace added · create a task when you are ready');
+      setStatus(relocating
+        ? `Workspace relocated · ${workspace.path}`
+        : cloning
+        ? (isBasic() ? 'Repository cloned · project ready for ChatGPT' : 'Repository cloned and opened · create a task when you are ready')
+        : (isBasic() ? 'Project ready · connect ChatGPT to start' : 'Workspace added · create a task when you are ready'));
     } catch (error) {
-      setStatus(`Workspace added · refresh failed: ${error.message}`);
+      setStatus(`${relocating ? 'Workspace relocated' : cloning ? 'Repository cloned' : 'Workspace added'} · refresh failed: ${error.message}`);
       scheduleTypedRefresh({ scopes: ['state'] });
     }
   })().catch(showWorkspaceError);
   $('new-task-button').onclick = () => {
     renderContextPanels();
     $('new-task-title').value = '';
+    $('new-task-description').value = '';
     $('new-task-error').hidden = true;
     const local = document.querySelector('input[name="task-environment"][value="local"]');
-    if (local) local.checked = true;
-    $('new-task-starting-ref-field').hidden = true;
+    const worktree = document.querySelector('input[name="task-environment"][value="worktree"]');
+    const preferParallel = Boolean(state.taskId && !state.gitError && state.git);
+    if (local) local.checked = !preferParallel;
+    if (worktree) worktree.checked = preferParallel;
+    $('new-task-starting-ref-field').hidden = !preferParallel;
+    $('new-task-assign-agent').checked = preferParallel;
     $('new-task-starting-ref').value = state.git?.branch || 'main';
     closeDialog('context-dialog');
     $('new-task-dialog').showModal();
     queueMicrotask(() => $('new-task-title').focus());
   };
+  $('task-brief-edit').onclick = () => {
+    const task = currentTask(); if (!task) return;
+    $('task-description-input').value = task.description || '';
+    $('task-description-error').hidden = true;
+    $('task-description-dialog').showModal();
+  };
+  $('task-handoff-edit').onclick = () => {
+    const task = currentTask(); if (!task) return;
+    $('task-handoff-summary-input').value = task.handoff?.summary || '';
+    $('task-handoff-next-input').value = (task.handoff?.nextSteps || []).join('\n');
+    $('task-handoff-notes-input').value = task.handoff?.notes || '';
+    $('task-handoff-error').hidden = true;
+    $('task-handoff-dialog').showModal();
+  };
   document.querySelectorAll('[data-close-dialog]').forEach(button => {
     button.onclick = () => $(button.dataset.closeDialog).close();
   });
-  $('tree-refresh').onclick = () => void loadTree().catch(error => setStatus(error.message));
-  $('tree-collapse').onclick = () => void collapseTree().catch(error => setStatus(error.message));
   $('reload-editor').onclick = () => void reloadActiveEditor().catch(error => setStatus(error.message));
   $('save-editor').onclick = () => void saveActiveEditor().catch(error => setStatus(error.message));
   $('refresh-changes').onclick = () => void loadChanges().then(renderHeader).catch(error => setStatus(error.message));
   $('environment-refresh').onclick = () => void loadChanges().then(renderHeader).catch(error => setStatus(error.message));
-  $('environment-changes').onclick = () => showChangesTab('changes');
+  $('environment-changes').onclick = () => openReviewCenter();
   $('environment-branch').onclick = () => void openBranchDialog().catch(error => setStatus(error.message));
   $('environment-primary-action').onclick = () => void runEnvironmentPrimaryAction().catch(error => setStatus(error.message));
   $('branch-fetch').onclick = () => void fetchBranches().catch(error => {
@@ -754,19 +1093,12 @@ function setupEvents() {
   });
   document.querySelectorAll('input[name="task-environment"]').forEach(input => {
     input.onchange = () => {
-      $('new-task-starting-ref-field').hidden = selectedTaskEnvironment() !== 'worktree';
+      const parallel = selectedTaskEnvironment() === 'worktree';
+      $('new-task-starting-ref-field').hidden = !parallel;
+      $('new-task-assign-agent').checked = parallel;
       if (!$('new-task-starting-ref').value.trim()) $('new-task-starting-ref').value = state.git?.branch || 'main';
     };
   });
-  $('search-toggle').onclick = () => {
-    $('search-panel').hidden = false;
-    $('search-query').focus();
-  };
-  let searchTimer;
-  $('search-query').oninput = () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => void searchWorkspace($('search-query').value).catch(error => setStatus(error.message)), 220);
-  };
   document.querySelectorAll('.filter-chip').forEach(button => button.onclick = () => setChangeFilter(button.dataset.filter));
   $('agent-change-filter').onchange = () => setAgentFilter($('agent-change-filter').value);
   document.querySelectorAll('.changes-tab').forEach(button => button.onclick = () => showChangesTab(button.dataset.tab));
@@ -781,7 +1113,11 @@ function setupEvents() {
   };
   $('create-checkpoint-inline').onclick = () => void createCheckpoint().catch(error => setStatus(error.message));
   $('restore-checkpoint').onclick = () => void restoreCurrentCheckpoint().catch(error => setStatus(error.message));
-  $('review-button').onclick = () => void openPrimaryReview().catch(error => setStatus(error.message));
+  $('review-button').onclick = () => openReviewCenter();
+  $('review-center-close').onclick = () => closeReviewCenter();
+  document.querySelectorAll('.review-center-filter').forEach(button => button.onclick = () => setReviewCenterFilter(button.dataset.reviewFilter));
+  $('review-center-next').onclick = () => void reviewNextChange().catch(error => setStatus(error.message));
+  $('review-center-stage-reviewed').onclick = () => void stageReviewedChanges().catch(error => setStatus(error.message));
   $('approve-operation').onclick = () => void decideCurrentOperation(true).catch(error => { $('review-error').textContent = error.message; $('review-error').hidden = false; });
   $('deny-operation').onclick = () => void decideCurrentOperation(false).catch(error => { $('review-error').textContent = error.message; $('review-error').hidden = false; });
   $('save-policy').onclick = () => void (async () => {
@@ -790,14 +1126,33 @@ function setupEvents() {
     await api(`/api/workbench/tasks/${task.id}/policy`, { method: 'PUT', body: { mode: selectedPolicyMode(), workspaceOnly: $('policy-scope').checked } });
     $('permissions-dialog').close(); await fullRefresh();
   })().catch(error => setStatus(error.message));
+  $('save-task-description').onclick = () => void (async () => {
+    const task = currentTask(); if (!task) return;
+    await api(`/api/workbench/tasks/${task.id}/description`, { method: 'PUT', body: { description: $('task-description-input').value } });
+    $('task-description-dialog').close();
+    await fullRefresh();
+    setStatus('Task description updated');
+  })().catch(error => { $('task-description-error').textContent = error.message; $('task-description-error').hidden = false; });
+  $('save-task-handoff').onclick = () => void (async () => {
+    const task = currentTask(); if (!task) return;
+    const summary = $('task-handoff-summary-input').value.trim();
+    if (!summary) throw new Error('Describe the current state before saving the handoff.');
+    const nextSteps = $('task-handoff-next-input').value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+    await api(`/api/workbench/tasks/${task.id}/handoff`, { method: 'PUT', body: { summary, nextSteps, notes: $('task-handoff-notes-input').value } });
+    $('task-handoff-dialog').close();
+    await fullRefresh();
+    setStatus('Handoff saved for the next agent');
+  })().catch(error => { $('task-handoff-error').textContent = error.message; $('task-handoff-error').hidden = false; });
   $('create-task').onclick = () => void (async () => {
     const submit = $('create-task');
     if (submit.disabled) return;
     const title = $('new-task-title').value.trim();
+    const description = $('new-task-description').value.trim();
     const workspace = currentWorkspace();
     const workspacePath = workspace?.path || $('new-task-workspace').value.trim();
     const environmentMode = selectedTaskEnvironment();
     const startingRef = $('new-task-starting-ref').value.trim() || state.git?.branch || 'HEAD';
+    const assignNextChatgpt = $('new-task-assign-agent').checked;
     if (!title) throw new Error('Enter a task name.');
     if (!workspace && !workspacePath) throw new Error('Choose a workspace first.');
     $('new-task-error').hidden = true;
@@ -810,6 +1165,9 @@ function setupEvents() {
         body: {
           ...(workspace ? { title, workspaceId: workspace.id } : { title, workspace: workspacePath }),
           environment: environmentMode === 'worktree' ? { mode: 'worktree', startingRef } : { mode: 'local' },
+          kind: environmentMode === 'worktree' ? 'parallel' : 'standard',
+          assignNextChatgpt,
+          description,
         },
       });
       await api(`/api/workbench/tasks/${task.id}/select`, { method: 'POST', body: {} });
@@ -825,7 +1183,7 @@ function setupEvents() {
     }
     try {
       await fullRefresh();
-      setStatus('New task created and selected for new ChatGPT sessions');
+      setStatus(assignNextChatgpt ? 'Task created · waiting for the next ChatGPT session' : 'New task created and selected');
     } catch (error) {
       setStatus(`Task created · refresh failed: ${error.message}`);
       scheduleTypedRefresh({ scopes: ['state'] });
@@ -856,15 +1214,24 @@ function setupEvents() {
 
 async function bootstrap() {
   setupEvents();
-  const saved = sessionStorage.getItem('local-coder-admin-token');
-  if (!saved) return;
-  $('token').value = saved;
+  setupChatSessions();
   try {
-    await connect(saved);
+    const fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const bootstrapToken = fragment.get('bootstrap');
+    if (bootstrapToken) {
+      history.replaceState(null, '', `${location.pathname}${location.search}`);
+      const response = await fetch('/api/workbench/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bootstrapToken }),
+      });
+      if (!response.ok) throw new Error('Local Workbench authentication failed. Restart with npm start.');
+    }
+    await connect();
   } catch (error) {
-    sessionStorage.removeItem('local-coder-admin-token');
-    $('connection-error').textContent = error.message;
-    $('connection-error').hidden = false;
+    state.connected = false;
+    setStatus(error?.message || 'Workbench authentication unavailable. Restart with npm start.');
   }
 }
 

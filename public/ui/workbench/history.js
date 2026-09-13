@@ -1,7 +1,7 @@
 import { api } from './api.js';
-import { currentWorkspace, currentWorkspaceOperations, state } from './state.js';
+import { currentWorkspace, currentWorkspaceOperations, isBasic, state } from './state.js';
 import { $, el, setStatus, taskRelative } from './dom.js';
-import { openOperationFileDiff, openOperationReview } from './changes.js';
+import { openChangeSetReview, restoreChangeSet, openOperationFileDiff, openOperationReview } from './changes.js';
 import { agentLabel } from './agent-identity.js';
 
 function taskForOperation(operation) {
@@ -155,11 +155,53 @@ function renderOperations() {
   if (!cards.length) $('operation-history').append(el('p', 'No activity yet.', 'empty-copy'));
 }
 
+function renderBasicHistory(changeSets) {
+  const groupedIds = new Set(changeSets.flatMap(item => item.operationIds));
+  const activity = [
+    ...changeSets.map(item => ({ ...item, grouped: true })),
+    ...currentWorkspaceOperations().filter(item => !groupedIds.has(item.id)),
+  ].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 60);
+  $('history-count').textContent = activity.length;
+  $('activity-scope-label').textContent = 'Recent work on this project';
+  const cards = activity.map(item => {
+    const card = el('div', undefined, 'history-card');
+    const copy = el('button', undefined, 'history-main');
+    copy.type = 'button';
+    const count = item.review?.files?.length || 0;
+    copy.append(el('strong', item.grouped ? `Edited ${count} file${count === 1 ? '' : 's'}` : operationLabel(item)),
+      el('span', `${formatTime(item.createdAt)}${item.review ? ` · +${item.review.additions} −${item.review.deletions}` : ''}`),
+      el('span', item.canRedo ? 'Undone' : item.status));
+    if (item.grouped) copy.onclick = () => void openChangeSetReview(item.id).catch(error => setStatus(error.message));
+    else if (item.status === 'pending' || count) copy.onclick = () => void openOperationReview(item.id).catch(error => setStatus(error.message));
+    else copy.disabled = true;
+    const actions = el('div', undefined, 'history-actions');
+    if (item.canUndo || item.canRedo) {
+      const redo = !item.canUndo && item.canRedo;
+      const button = el('button', redo ? 'Redo' : 'Undo', 'mini-action');
+      button.type = 'button';
+      button.onclick = () => void restoreChangeSet(item.id, redo).catch(error => setStatus(error.message));
+      actions.append(button);
+    }
+    card.append(copy, actions);
+    return card;
+  });
+  $('operation-history').replaceChildren(...cards);
+  if (!cards.length) $('operation-history').append(el('p', 'Your ChatGPT edits will appear here.', 'empty-copy'));
+}
+
 export async function loadHistory() {
   if (!state.taskId) return;
-  state.checkpoints = await api(`/api/workbench/tasks/${state.taskId}/checkpoints`);
+  const workspaceId = state.workspaceId, taskId = state.taskId;
+  const basic = isBasic();
+  const [checkpoints, changeSets] = await Promise.all([
+    api(`/api/workbench/tasks/${taskId}/checkpoints`),
+    basic ? api(`/api/workbench/workspaces/${workspaceId}/change-sets`) : Promise.resolve([]),
+  ]);
+  if (workspaceId !== state.workspaceId || taskId !== state.taskId || basic !== isBasic()) return;
+  state.checkpoints = checkpoints;
   renderCheckpoints();
-  renderOperations();
+  if (basic) renderBasicHistory(changeSets);
+  else renderOperations();
 }
 
 export async function createCheckpoint() {

@@ -6,13 +6,12 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fs from "node:fs/promises";
 import os from "node:os";
+import { freePorts } from "./test-ports.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
-const control = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-all-tests-"));
 
-const mcpPort = 4200 + Math.floor(Math.random() * 200);
-const adminPort = mcpPort + 1;
+const [mcpPort, adminPort] = await freePorts(2);
 
 function runNode(script, env = {}) {
   const scriptPath = path.join(root, script);
@@ -57,32 +56,52 @@ console.log("=== Build ===");
 await runBuild();
 
 const unitScripts = [
+  "scripts/test-state-ownership.mjs",
   "scripts/test-patch.mjs",
   "scripts/test-tools.mjs",
   "scripts/test-checkpoints.mjs",
   "scripts/test-activity-log.mjs",
   "scripts/test-project-memory.mjs",
+  "scripts/test-auto-memory.mjs",
   "scripts/test-tool-profile.mjs",
+  "scripts/test-skills.mjs",
   "scripts/test-shell-persist.mjs",
   "scripts/test-chatgpt-web.mjs",
+  "scripts/test-continuity.mjs",
+  "scripts/test-handoff-expiry.mjs",
+  "scripts/test-control-permissions.mjs",
   "scripts/test-workbench.mjs",
+  "scripts/test-experience.mjs",
 ];
 
-console.log("\n=== Unit tests ===");
-for (const script of unitScripts) {
-  console.log(`\n--- ${script} ---`);
-  await runNode(script);
+if (!process.argv.includes("--readiness-only")) {
+  console.log("\n=== Unit tests ===");
+  for (const script of unitScripts) {
+    console.log(`\n--- ${script} ---`);
+    await runNode(script);
+  }
 }
 
 console.log("\n=== Integration (spawn server) ===");
-const server = spawn(process.execPath, ["dist/index.js"], {
-  cwd: root,
+const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-all-tests-"));
+const control = path.join(fixtureRoot, "control");
+const workspace = path.join(fixtureRoot, "project");
+await fs.mkdir(workspace);
+await fs.writeFile(path.join(fixtureRoot, "upstream.json"), '{"version":1,"servers":[]}');
+const server = spawn(process.execPath, [path.join(root, "dist/index.js")], {
+  cwd: fixtureRoot,
+  windowsHide: true,
   env: {
     ...process.env,
     PORT: String(mcpPort),
     ADMIN_PORT: String(adminPort),
     CHATGPT_TOOL_PROFILE: "slim",
     ADMIN_TOKEN: "all-test-admin", MCP_AUTH_TOKEN: "all-test-mcp", WORKBENCH_PATH: control, WORKBENCH_DEFAULT_MODE: "full",
+    WORKBENCH_EXPERIENCE: "advanced", WORKBENCH_REMOTE_POLICY_CONTROL: "false",
+    WORKSPACE_PATH: workspace, WORKSPACE_PATHS: "", EXTRA_WORKSPACE_PATHS: "", ALLOWED_WORKSPACE_PATHS: "",
+    CODEX_HOME: path.join(fixtureRoot, "codex"), MCP_UPSTREAM_CONFIG: path.join(fixtureRoot, "upstream.json"),
+    AUDIT_LOG_PATH: path.join(fixtureRoot, "audit.log"), CHECKPOINT_PATH: path.join(fixtureRoot, "checkpoints"),
+    MCP_SHELL_STATE_DIR: path.join(fixtureRoot, "shell"), PUBLIC_BASE_URL: `http://127.0.0.1:${mcpPort}`,
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -134,8 +153,9 @@ try {
   const tools = listJson?.result?.tools || [];
   const bytes = Buffer.byteLength(listText, "utf-8");
   console.log(`OK  tools/list: ${tools.length} tools, ${Math.round(bytes / 1024)}KB`);
-  if (tools.length > 30) console.warn(`WARN tools/list has ${tools.length} tools — consider slim profile`);
+  if (health.instructions.tool_profile !== "slim") throw new Error("Readiness fixture did not use the slim profile");
   if (!tools.some((t) => t.name === "apply_patch")) throw new Error("apply_patch missing");
+  if (!tools.some((t) => t.name === "task_complete")) throw new Error("task_complete missing");
 
   process.env.PORT = String(mcpPort);
   await runNode("scripts/test-mcp-session.mjs", { PORT: String(mcpPort), MCP_AUTH_TOKEN: "all-test-mcp" });
@@ -144,7 +164,7 @@ try {
   const closed = new Promise(resolve => server.once("exit", resolve));
   server.kill();
   await closed;
-  if (path.dirname(control) === path.resolve(os.tmpdir()) && path.basename(control).startsWith("workbench-all-tests-")) await fs.rm(control, { recursive: true, force: true });
+  if (path.dirname(fixtureRoot) === path.resolve(os.tmpdir()) && path.basename(fixtureRoot).startsWith("workbench-all-tests-")) await fs.rm(fixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-console.log("\n=== ALL TESTS PASSED ===");
+console.log(process.argv.includes("--readiness-only") ? "\n=== READINESS TESTS PASSED ===" : "\n=== ALL TESTS PASSED ===");

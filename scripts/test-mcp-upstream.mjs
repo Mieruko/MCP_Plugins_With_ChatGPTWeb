@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "node:child_process";
+import net from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   importCursorMcpConfig,
@@ -146,7 +147,10 @@ await run("parse and import cursor mcp config", async () => {
   }
 });
 
-const httpPort = 3901 + Math.floor(Math.random() * 200);
+const portProbe = net.createServer();
+await new Promise((resolve, reject) => { portProbe.once("error", reject); portProbe.listen(0, "127.0.0.1", resolve); });
+const httpPort = portProbe.address().port;
+await new Promise(resolve => portProbe.close(resolve));
 const mockHttp = spawnMockHttp(httpPort);
 try {
   await waitForHealth(`http://127.0.0.1:${httpPort}/health`);

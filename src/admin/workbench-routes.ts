@@ -3,7 +3,8 @@ import path from "node:path";
 import { Router } from "express";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { changeSetDetail, createTask, createTaskCheckpoint, createWorkspace, decideOperation, dispatch, getWorkbench, latestWorkspaceChangeSet, listTaskCheckpoints, operationDetail, previewTaskCheckpoint, restoreTaskCheckpoint, selectTask, selectWorkspace, setTaskPolicy, setTaskPreview, subscribeWorkbench, taskExecutionPath, undoChangeSet, undoOperation } from "../lib/workbench.js";
+import type { McpSessionSummary } from "../lib/mcp-session-manager.js";
+import { attachTaskPreviewProcess, cancelAgentTaskAssignment, changeSetDetail, cleanupTaskIntegration, cloneWorkspace, createTask, createTaskCheckpoint, createWorkspace, decideOperation, discardTaskIntegration, dispatch, finishTaskIntegration, getAgentCoordinator, getIntegrationQueue, getWorkbench, latestWorkspaceChangeSet, listTaskCheckpoints, markTaskReadyForMerge, mergeTaskIntegration, operationDetail, prepareTaskPreviewStart, previewTaskCheckpoint, queueAgentTaskAssignment, releaseTaskPreviewPort, relocateWorkspace, removeWorkspace, reopenTaskIntegration, restoreTaskCheckpoint, selectTask, selectWorkspace, setTaskDescription, setTaskHandoff, setTaskIntegrationDependencies, setTaskPolicy, setTaskPreview, subscribeWorkbench, taskExecutionPath, undoChangeSet, undoOperation } from "../lib/workbench.js";
 import { getMachineRoots } from "../lib/path-security.js";
 import { registerFilesystemTools } from "../tools/filesystem.js";
 import { registerShellTools } from "../tools/shell.js";
@@ -11,8 +12,10 @@ import { registerGitTools } from "../tools/git.js";
 import { registerContextTools } from "../tools/context.js";
 import { executeGithub, githubSchema } from "../tools/github.js";
 import { getOAuthProvider } from "../lib/oauth-provider.js";
+import { getTaskRuntime, stopTaskRuntimeProcesses } from "../lib/task-runtime.js";
+import { getWorkspaceExperience, listWorkspaceChangeSets, setWorkspaceExperience, takeWorkspaceWriter } from "../lib/workbench.js";
 
-export function createWorkbenchRouter(): Router {
+export function createWorkbenchRouter(options: { sessionList?: () => McpSessionSummary[] } = {}): Router {
   const router = Router();
   type Definition = { config: any; handler: any };
   const collect = (register: (server: McpServer) => void) => {
@@ -37,12 +40,12 @@ export function createWorkbenchRouter(): Router {
     }
     return item.path ? item : null;
   }).filter(Boolean);
-  const invoke = async (taskId: string, tool: string, rawArgs: Record<string, unknown>, definitions: Map<string, Definition>, human = true) => {
+  const invoke = async (taskId: string, tool: string, rawArgs: Record<string, unknown>, definitions: Map<string, Definition>, human = true, environment?: Record<string, string>) => {
     const found = await task(taskId);
     const def = definitions.get(tool);
     if (!def) throw new Error(`Unknown tool: ${tool}`);
     const args = z.object(def.config.inputSchema).strict().parse(rawArgs);
-    const result: any = await dispatch(found.id, tool, args, () => def.handler(args, { signal: undefined }), human);
+    const result: any = await dispatch(found.id, tool, args, () => def.handler(args, { signal: undefined }), human, undefined, environment);
     return result?.structuredContent?.data ?? result?.structuredContent ?? result;
   };
   const shellDefinitions = (workspace: string) => collect(server => registerShellTools(server, workspace, Number(process.env.SHELL_TIMEOUT || 120)));
@@ -68,7 +71,9 @@ export function createWorkbenchRouter(): Router {
     try { res.json({ ok: true, data: await handler(req) }); }
     catch (error) { res.status(400).json({ ok: false, error: String(error) }); }
   };
-  router.get("/api/workbench", route(() => getWorkbench()));
+  router.get("/api/workbench", route(() => getWorkbench(options.sessionList?.() || [])));
+  router.get("/api/workbench/agents", route(() => getAgentCoordinator(options.sessionList?.() || [])));
+  router.get("/api/workbench/integration", route(req => getIntegrationQueue(typeof req.query.workspaceId === "string" ? req.query.workspaceId : undefined)));
   router.get("/api/workbench/folders", route(async req => {
     const requested = typeof req.query.path === "string" ? req.query.path.trim() : "";
     if (!requested) return { path: null, parent: null, roots: getMachineRoots(), directories: [] };
@@ -87,7 +92,32 @@ export function createWorkbenchRouter(): Router {
     const body = z.object({ name: z.string().max(120).default(""), path: z.string().min(1) }).strict().parse(req.body);
     return createWorkspace(body.name, body.path);
   }));
+  router.post("/api/workbench/workspaces/clone", route(req => {
+    const body = z.object({
+      repository: z.string().trim().min(1).max(2048),
+      destinationParent: z.string().trim().min(1).max(4096),
+      folderName: z.string().trim().max(240).optional(),
+      branch: z.string().trim().max(200).optional(),
+      name: z.string().trim().max(120).optional().default(""),
+    }).strict().parse(req.body);
+    return cloneWorkspace(body);
+  }));
   router.post("/api/workbench/workspaces/:id/select", route(req => selectWorkspace(req.params.id)));
+  router.put("/api/workbench/workspaces/:id/path", route(req => {
+    const body = z.object({ path: z.string().trim().min(1).max(4096) }).strict().parse(req.body);
+    return relocateWorkspace(req.params.id, body.path, options.sessionList?.() || []);
+  }));
+  router.delete("/api/workbench/workspaces/:id", route(req => removeWorkspace(req.params.id, options.sessionList?.())));
+  router.get("/api/workbench/workspaces/:id/experience", route(req => getWorkspaceExperience(req.params.id, options.sessionList?.() || [])));
+  router.get("/api/workbench/workspaces/:id/change-sets", route(req => listWorkspaceChangeSets(req.params.id)));
+  router.put("/api/workbench/workspaces/:id/experience", route(req => {
+    const { mode } = z.object({ mode: z.enum(["basic", "advanced"]) }).strict().parse(req.body);
+    return setWorkspaceExperience(req.params.id, mode, options.sessionList?.() || []);
+  }));
+  router.post("/api/workbench/workspaces/:id/writer", route(req => {
+    const body = z.object({ sessionId: z.string().min(1), expectedSessionId: z.string().nullable() }).strict().parse(req.body);
+    return takeWorkspaceWriter(req.params.id, body.sessionId, body.expectedSessionId, options.sessionList?.() || []);
+  }));
   router.get("/api/workbench/connections", route(async () => getOAuthProvider()?.listPending() || []));
   router.post("/api/workbench/connections/:id", route(async req => {
     const { approve } = z.object({ approve: z.boolean() }).strict().parse(req.body);
@@ -103,10 +133,37 @@ export function createWorkbenchRouter(): Router {
         mode: z.enum(["local", "worktree"]).default("local"),
         startingRef: z.string().min(1).max(200).optional(),
       }).strict().optional(),
+      kind: z.enum(["standard", "parallel"]).optional(),
+      assignNextChatgpt: z.boolean().optional().default(false),
+      description: z.string().max(4000).optional().default(""),
     }).strict().refine(value => Boolean(value.workspace || value.workspaceId), { message: "workspace or workspaceId required" }).parse(req.body);
-    return createTask(body.title, body.workspace, body.workspaceId, body.environment);
+    return createTask(body.title, body.workspace, body.workspaceId, body.environment, { kind: body.kind, assignNextChatgpt: body.assignNextChatgpt, description: body.description });
   }));
   router.post("/api/workbench/tasks/:id/select", route(req => selectTask(req.params.id)));
+  router.put("/api/workbench/tasks/:id/description", route(req => {
+    const body = z.object({ description: z.string().max(4000) }).strict().parse(req.body);
+    return setTaskDescription(req.params.id, body.description);
+  }));
+  router.put("/api/workbench/tasks/:id/handoff", route(req => {
+    const body = z.object({
+      summary: z.string().min(1).max(6000),
+      nextSteps: z.array(z.string().max(1000)).max(20).optional().default([]),
+      notes: z.string().max(6000).optional().default(""),
+    }).strict().parse(req.body);
+    return setTaskHandoff(req.params.id, body);
+  }));
+  router.put("/api/workbench/tasks/:id/integration/dependencies", route(req => {
+    const body = z.object({ taskIds: z.array(z.string().min(1)).max(100) }).strict().parse(req.body);
+    return setTaskIntegrationDependencies(req.params.id, body.taskIds);
+  }));
+  router.post("/api/workbench/tasks/:id/integration/ready", route(req => markTaskReadyForMerge(req.params.id)));
+  router.post("/api/workbench/tasks/:id/integration/reopen", route(req => reopenTaskIntegration(req.params.id)));
+  router.post("/api/workbench/tasks/:id/integration/merge", route(req => mergeTaskIntegration(req.params.id)));
+  router.post("/api/workbench/tasks/:id/integration/cleanup", route(req => cleanupTaskIntegration(req.params.id)));
+  router.post("/api/workbench/tasks/:id/integration/finish", route(req => finishTaskIntegration(req.params.id)));
+  router.post("/api/workbench/tasks/:id/integration/discard", route(req => discardTaskIntegration(req.params.id)));
+  router.post("/api/workbench/tasks/:id/assignment", route(req => queueAgentTaskAssignment(req.params.id)));
+  router.delete("/api/workbench/tasks/:id/assignment", route(req => cancelAgentTaskAssignment(req.params.id)));
   router.put("/api/workbench/tasks/:id/policy", route(req => {
     const body = z.object({ mode: z.enum(["ask", "auto", "full"]), workspaceOnly: z.boolean() }).strict().parse(req.body);
     return setTaskPolicy(req.params.id, body.mode, body.workspaceOnly);
@@ -185,6 +242,17 @@ export function createWorkbenchRouter(): Router {
     const found = await task(req.params.id);
     return invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
   }));
+  router.get("/api/workbench/tasks/:id/runtime", route(async req => {
+    await task(req.params.id);
+    return getTaskRuntime(req.params.id);
+  }));
+  router.post("/api/workbench/tasks/:id/processes/stop-all", route(async req => {
+    await task(req.params.id);
+    const body = z.object({ force: z.boolean().default(true) }).strict().parse(req.body || {});
+    const result = await stopTaskRuntimeProcesses(req.params.id, body.force);
+    const previewRelease = await releaseTaskPreviewPort(req.params.id);
+    return { ...result, previewRelease };
+  }));
   router.post("/api/workbench/tasks/:id/processes", route(async req => {
     const found = await task(req.params.id);
     const body = z.object({ command: z.string().min(1), working_directory: z.string().optional(), yield_time_ms: z.number().int().min(0).max(10000).default(500) }).strict().parse(req.body);
@@ -207,19 +275,26 @@ export function createWorkbenchRouter(): Router {
   router.post("/api/workbench/tasks/:id/processes/:processId/stop", route(async req => {
     const found = await task(req.params.id);
     const force = z.object({ force: z.boolean().default(false) }).strict().parse(req.body || {}).force;
-    return invoke(found.id, "stop_process", { id: req.params.processId, force }, shellDefinitions(executionRoot(found)), true);
+    const result: any = await invoke(found.id, "stop_process", { id: req.params.processId, force }, shellDefinitions(executionRoot(found)), true);
+    if (found.preview?.processId === req.params.processId) {
+      return { ...result, previewRelease: await releaseTaskPreviewPort(found.id) };
+    }
+    return result;
   }));
   router.get("/api/workbench/tasks/:id/preview", route(async req => {
     const found = await task(req.params.id);
-    if (!found.preview) return { configured: false, running: false };
+    if (!found.preview) return { configured: false, running: false, reachable: false, leased: false };
     const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
     const process = (status.processes || []).find((item: any) => item.id === found.preview?.processId);
     const running = Boolean(process?.running);
-    const probe = running ? await probePreviewUrl(found.preview.url) : { reachable: false, status: null, error: null };
+    const probe = running && found.preview.url ? await probePreviewUrl(found.preview.url) : { reachable: false, status: null, error: null };
     return {
       configured: true,
       command: found.preview.command,
       url: found.preview.url,
+      port: found.preview.port,
+      autoPort: Boolean(found.preview.autoPort),
+      leased: Boolean(found.preview.leaseId),
       processId: found.preview.processId,
       startedAt: found.preview.startedAt,
       running,
@@ -228,10 +303,11 @@ export function createWorkbenchRouter(): Router {
       probeError: probe.error,
       exitCode: process?.exit_code ?? null,
       stale: Boolean(found.preview.processId && !process),
+      staleLease: Boolean(found.preview.leaseId && !running),
     };
   }));
   router.put("/api/workbench/tasks/:id/preview", route(async req => {
-    const body = z.object({ command: z.string().min(1).max(4000), url: z.string().min(1).max(2048) }).strict().parse(req.body);
+    const body = z.object({ command: z.string().min(1).max(4000), url: z.string().min(1).max(2048).optional() }).strict().parse(req.body);
     const found = await task(req.params.id);
     if (found.preview?.processId) {
       const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
@@ -239,24 +315,48 @@ export function createWorkbenchRouter(): Router {
         throw new Error("Stop the running preview before changing its configuration.");
       }
     }
-    return setTaskPreview(found.id, { command: body.command, url: normalizePreviewUrl(body.url) });
+    return setTaskPreview(found.id, body.url
+      ? { command: body.command, url: normalizePreviewUrl(body.url), autoPort: false }
+      : { command: body.command, autoPort: true });
   }));
   router.post("/api/workbench/tasks/:id/preview/start", route(async req => {
-    const body = z.object({ command: z.string().min(1).max(4000), url: z.string().min(1).max(2048) }).strict().parse(req.body);
+    const body = z.object({ command: z.string().min(1).max(4000).optional(), url: z.string().min(1).max(2048).optional() }).strict().parse(req.body || {});
     const found = await task(req.params.id);
     if (found.policy.workspaceOnly) {
       throw new Error("WORKSPACE_EXTERNAL_BLOCKED: Project Preview needs a host-reachable port. The workspace sandbox intentionally uses network=none; switch this task to machine scope to start Preview.");
     }
-    const url = normalizePreviewUrl(body.url);
     if (found.preview?.processId) {
       const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
       if ((status.processes || []).some((item: any) => item.id === found.preview?.processId && item.running)) {
         throw new Error("Preview is already running. Stop it before starting a new preview.");
       }
     }
-    const started: any = await invoke(found.id, "start_process", { command: body.command, yield_time_ms: 500 }, shellDefinitions(executionRoot(found)), true);
-    await setTaskPreview(found.id, { command: body.command, url, processId: started.id, startedAt: new Date().toISOString() });
-    return { ...started, url };
+    const command = body.command || found.preview?.command;
+    if (!command) throw new Error("Preview command is required before starting Preview.");
+    const explicitUrl = body.url ? normalizePreviewUrl(body.url) : undefined;
+    const prepared = await prepareTaskPreviewStart(found.id, { command, ...(explicitUrl ? { url: explicitUrl } : {}) });
+    let started: any;
+    try {
+      started = await invoke(
+        found.id,
+        "start_process",
+        { command, yield_time_ms: 500 },
+        shellDefinitions(executionRoot(found)),
+        true,
+        { PORT: String(prepared.port), LOCAL_CODER_PREVIEW_PORT: String(prepared.port) },
+      );
+      if (!started?.id) throw new Error("Preview process did not return a process id.");
+      const preview = await attachTaskPreviewProcess(found.id, started.id);
+      return { ...started, url: preview.url, port: preview.port, autoPort: preview.autoPort };
+    } catch (error) {
+      if (started?.id) {
+        await invoke(found.id, "stop_process", { id: started.id, force: true }, shellDefinitions(executionRoot(found)), true).catch(() => {});
+        await releaseTaskPreviewPort(found.id).catch(() => {});
+      } else {
+        await releaseTaskPreviewPort(found.id, { force: true }).catch(() => {});
+      }
+      throw error;
+    }
   }));
   router.post("/api/workbench/tasks/:id/preview/stop", route(async req => {
     const found = await task(req.params.id);
@@ -264,11 +364,13 @@ export function createWorkbenchRouter(): Router {
     if (found.preview.processId) {
       const status: any = await invoke(found.id, "process_status", {}, shellDefinitions(executionRoot(found)));
       if ((status.processes || []).some((item: any) => item.id === found.preview?.processId && item.running)) {
-        await invoke(found.id, "stop_process", { id: found.preview.processId, force: false }, shellDefinitions(executionRoot(found)), true);
+        await invoke(found.id, "stop_process", { id: found.preview.processId, force: true }, shellDefinitions(executionRoot(found)), true);
       }
     }
-    await setTaskPreview(found.id, { command: found.preview.command, url: found.preview.url });
-    return { stopped: true };
+    const released = await releaseTaskPreviewPort(found.id);
+    return released.released
+      ? { stopped: true, port: released.port }
+      : { stopped: false, port: released.port, reason: "Preview process stopped, but the leased port is still occupied; the lease was preserved for safety." };
   }));
   router.get("/api/workbench/tasks/:id/git/status", route(async req => {
     const found = await task(req.params.id);

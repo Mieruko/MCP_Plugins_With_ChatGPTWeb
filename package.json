@@ -4,11 +4,11 @@
   "description": "Turn ChatGPT web into a local coding agent via MCP — files, shell, git, apply_patch, 40+ tools",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hoangcoderr/chatgpt-local-coder.git"
+    "url": "https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git"
   },
-  "homepage": "https://github.com/hoangcoderr/chatgpt-local-coder#readme",
+  "homepage": "https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb#readme",
   "bugs": {
-    "url": "https://github.com/hoangcoderr/chatgpt-local-coder/issues"
+    "url": "https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/issues"
   },
   "author": "hoangcoderr",
   "type": "module",
@@ -18,7 +18,10 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node scripts/test-sandbox.mjs && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-workbench.mjs",
+    "test": "npm run build && node scripts/test-state-ownership.mjs && node scripts/test-sandbox.mjs && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-auto-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-skills.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-continuity.mjs && node scripts/test-handoff-expiry.mjs && node scripts/test-control-permissions.mjs && node scripts/test-workbench.mjs && node scripts/test-experience.mjs",
+    "test:permissions": "npm run build && node scripts/test-control-permissions.mjs",
+    "test:skills": "npm run build && node scripts/test-skills.mjs",
+    "test:experience": "npm run build && node scripts/test-experience.mjs",
     "test:workbench": "npm run build && node scripts/test-workbench.mjs",
     "test:chatgpt": "npm run build && node scripts/test-chatgpt-web.mjs",
     "test:all": "node scripts/run-all-tests.mjs",
@@ -50,6 +53,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "monaco-editor": "^0.56.0",
+    "yaml": "^2.9.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {

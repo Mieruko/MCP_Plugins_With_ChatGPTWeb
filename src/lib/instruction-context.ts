@@ -11,7 +11,7 @@ import {
   type ProjectMemoryBundle,
 } from "./project-memory.js";
 import { appendAutoMemory, formatAutoMemoryForInstructions, loadAutoMemory } from "./auto-memory.js";
-import { formatSkillsForInstructions, loadProjectSkills } from "./skills-loader.js";
+import { formatSkillsForInstructions, loadSkillCatalog, type SkillCatalog } from "./skills-loader.js";
 import { getChatGptToolProfile } from "./tool-profile.js";
 import { buildServerInstructions } from "./quickstart.js";
 
@@ -25,6 +25,7 @@ export interface InstructionContextOptions {
 export interface InstructionContext {
   projectMemory: ProjectMemoryBundle;
   git: GitSnapshot;
+  skills: SkillCatalog;
   instructionsText: string;
   instructionBytes: number;
 }
@@ -35,7 +36,7 @@ export async function buildInstructionContext(
   const [projectMemory, git, skills, autoMemory] = await Promise.all([
     loadProjectMemory(opts.workspaceRoot, { workspaceRoots: opts.workspaceRoots }),
     collectGitSnapshot(opts.workspaceRoot),
-    loadProjectSkills(opts.workspaceRoot),
+    loadSkillCatalog(opts.workspaceRoot),
     loadAutoMemory(opts.workspaceRoot),
   ]);
 
@@ -68,6 +69,7 @@ export async function buildInstructionContext(
   return {
     projectMemory,
     git,
+    skills,
     instructionsText,
     instructionBytes: Buffer.byteLength(instructionsText, "utf-8"),
   };
@@ -84,6 +86,12 @@ export function summarizeInstructionContext(ctx: InstructionContext): Record<str
     })),
     memory_bytes: ctx.projectMemory.total_bytes,
     instruction_bytes: ctx.instructionBytes,
+    skills: {
+      count: ctx.skills.skills.length,
+      revision: ctx.skills.revision,
+      complete: ctx.skills.complete,
+      diagnostics: ctx.skills.diagnostics.length,
+    },
     git: ctx.git.is_repo
       ? { branch: ctx.git.branch, commits: ctx.git.recent_commits?.length ?? 0 }
       : { is_repo: false },
