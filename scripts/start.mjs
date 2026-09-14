@@ -136,8 +136,19 @@ function runBuildIfNeeded() {
   const needsBuild = !fs.existsSync(dist) || (fs.existsSync(src) && fs.statSync(src).mtimeMs > fs.statSync(dist).mtimeMs);
   if (!needsBuild) return;
   console.log("  Building project...");
-  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(npmCmd, ["run", "build"], { cwd: root, stdio: "inherit", env: process.env });
+  // Recent Node versions on Windows can reject direct .cmd execution with
+  // EINVAL. npm exposes its JS entry point while running lifecycle scripts,
+  // so invoke that with Node instead of spawning npm.cmd directly.
+  const npmExecPath = process.env.npm_execpath;
+  const command = npmExecPath && fs.existsSync(npmExecPath) ? process.execPath : (process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm");
+  const buildArgs = npmExecPath && fs.existsSync(npmExecPath)
+    ? [npmExecPath, "run", "build"]
+    : (process.platform === "win32" ? ["/d", "/s", "/c", "npm.cmd run build"] : ["run", "build"]);
+  const result = spawnSync(command, buildArgs, { cwd: root, stdio: "inherit", env: process.env });
+  if (result.error) {
+    console.error(`\nBuild failed to start: ${result.error.message}\n`);
+    process.exit(1);
+  }
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
