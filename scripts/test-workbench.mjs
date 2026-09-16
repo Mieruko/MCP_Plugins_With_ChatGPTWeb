@@ -1254,6 +1254,86 @@ try {
   console.log('OK Session Routing V2 claims multiple queued tasks and runs three ChatGPT agents concurrently regardless of Workbench selection');
   console.log('OK aggregate agent coordinator reports active work, changed paths and cross-task conflicts');
 
+  // Regression for the real chat workflow: @Coder is already bound to one task,
+  // then the user explicitly asks it to read an existing different task in the
+  // SAME workspace. Neither Ask/workspace-only nor dashboard selection should
+  // prevent this safe operation or retarget any other chat.
+  const testerTask = await adminRequest('/api/workbench/tasks', {
+    title: 'Tester', workspaceId: task.workspaceId,
+    environment: { mode: 'worktree', startingRef: 'HEAD' }, kind: 'parallel', assignNextChatgpt: true,
+  });
+  sid = undefined;
+  await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ChatGPT fourth parallel agent', version: '1' } });
+  const testerSid = sid;
+  assert.equal(payload(await call('workbench')).task.id, testerTask.id, 'fourth chat claims a fourth independent task in the same workspace');
+  const dataTask = await adminRequest('/api/workbench/tasks', {
+    title: 'Kết nối data', workspaceId: task.workspaceId,
+    environment: { mode: 'worktree', startingRef: 'HEAD' }, kind: 'parallel', assignNextChatgpt: true,
+  });
+  await adminRequest('/api/workbench/tasks', { title: 'Duplicate task name', workspaceId: task.workspaceId });
+  await adminRequest('/api/workbench/tasks', { title: 'Duplicate task name', workspaceId: task.workspaceId });
+  await fs.writeFile(path.join(dataTask.execution.path, 'data-only.txt'), 'DATA_TASK_WORKTREE_ONLY');
+  await policy(backendTask.id, 'ask', true);
+  sid = backendSid;
+  const available = payload(await call('workbench'));
+  assert.ok(available.available_tasks.some(item => item.id === dataTask.id && item.title === 'Kết nối data'));
+  assert.ok(available.available_tasks.some(item => item.id === testerTask.id && item.in_use_by_other_chat));
+  const selectionBeforeSwitch = (await adminRequest('/api/workbench')).selectedTaskId;
+  const occupied = await call('workbench_control', { action: 'target', task_title: 'Tester', create_missing: false });
+  assert.equal(occupied.isError, true);
+  assert.match(text(occupied), /TASK_TARGET_IN_USE/);
+  const foreign = await call('workbench_control', { action: 'target', task_title: 'Second project', create_missing: false });
+  assert.equal(foreign.isError, true);
+  assert.match(text(foreign), /TASK_TARGET_NOT_FOUND/);
+  const ambiguous = await call('workbench_control', { action: 'target', task_title: 'Duplicate task name', create_missing: false });
+  assert.equal(ambiguous.isError, true);
+  assert.match(text(ambiguous), /TASK_TARGET_AMBIGUOUS/);
+  const reserved = await call('workbench_control', { action: 'target', task_title: 'Kết nối data', create_missing: false });
+  assert.equal(reserved.isError, true);
+  assert.match(text(reserved), /TASK_TARGET_RESERVED/, 'a chat cannot silently steal another session\'s queued lease');
+  await adminRequest(`/api/workbench/tasks/${dataTask.id}/assignment`, {}, 'DELETE');
+  assert.equal(payload(await call('workbench')).task.id, backendTask.id, 'failed task switches do not change the binding');
+
+  const pendingSwitch = payload(await call('write_file', { path: 'pending-before-switch.txt', content: 'must not execute' }));
+  assert.equal(pendingSwitch.status, 'approval_required');
+  const busySwitch = await call('workbench_control', { action: 'target', task_title: 'Kết nối data', create_missing: false });
+  assert.equal(busySwitch.isError, true);
+  assert.match(text(busySwitch), /AGENT_TARGET_BUSY/);
+  await adminRequest(`/api/workbench/operations/${pendingSwitch.operation_id}/decision`, { approve: false });
+  const switched = payload(await call('workbench_control', { action: 'target', task_title: 'Kết nối data', create_missing: false }));
+  assert.equal(switched.task.id, dataTask.id);
+  assert.equal(switched.created.task, false);
+  assert.equal(switched.dashboard_selection_unchanged, true);
+  assert.equal(payload(await call('workbench')).task.id, dataTask.id);
+  assert.equal(payload(await call('workbench_control', { action: 'target', task_id: dataTask.id, create_missing: false })).session.retargeted, false,
+    'target by exact task ID is idempotent');
+  assert.match(text(await call('read_text_file', { path: 'data-only.txt' })), /DATA_TASK_WORKTREE_ONLY/);
+  assert.equal((await call('read_text_file', { path: path.join(backendTask.execution.path, 'sample.txt') })).isError, true,
+    'workspace-only after switching cannot access the previous task worktree');
+  assert.equal(path.resolve(payload(await call('project_context')).data.root), path.resolve(dataTask.execution.path));
+  assert.equal(path.resolve(payload(await call('shell_status')).data.cwd), path.resolve(dataTask.execution.path));
+  assert.equal((await adminRequest('/api/workbench')).selectedTaskId, selectionBeforeSwitch);
+  assert.equal(payload(await callWithSession(assignmentSid, 'workbench')).task.id, isolatedTask.id);
+  assert.equal(payload(await callWithSession(conflictSid, 'workbench')).task.id, conflictTask.id);
+  assert.equal(payload(await callWithSession(testerSid, 'workbench')).task.id, testerTask.id);
+
+  await policy(dataTask.id, 'full', false);
+  await policy(testerTask.id, 'full', false);
+  await Promise.all([
+    callWithSession(assignmentSid, 'run_command', { command: sessionTimedCommand('four-agent-a.json', 650) }),
+    callWithSession(conflictSid, 'run_command', { command: sessionTimedCommand('four-agent-b.json', 650) }),
+    callWithSession(backendSid, 'run_command', { command: sessionTimedCommand('four-agent-c.json', 650) }),
+    callWithSession(testerSid, 'run_command', { command: sessionTimedCommand('four-agent-d.json', 650) }),
+  ]);
+  const fourAgents = await Promise.all([
+    [isolatedTask.execution.path, 'four-agent-a.json'], [conflictTask.execution.path, 'four-agent-b.json'],
+    [dataTask.execution.path, 'four-agent-c.json'], [testerTask.execution.path, 'four-agent-d.json'],
+  ].map(async ([root, file]) => JSON.parse(await fs.readFile(path.join(root, file), 'utf8'))));
+  assert.ok(fourAgents.every((current, index) => fourAgents.every((other, otherIndex) =>
+    index === otherIndex || (current.start < other.end && other.start < current.end))),
+  'four ChatGPT sessions perform commands concurrently in four separate worktrees in the same workspace');
+  console.log('OK explicit Ask/workspace-only chat task switching is isolated, conflict-safe and four agents run simultaneously');
+
   const integrationWorkspacePath = path.join(tmp, 'integration-project');
   await fs.mkdir(integrationWorkspacePath);
   await fs.writeFile(path.join(integrationWorkspacePath, 'base.txt'), 'integration base\n');
@@ -1530,6 +1610,12 @@ try {
   sid = undefined; await start();
   sid = preRestartSid;
   assert.equal(payload(await call('workbench')).task.id, task.id, 'Recovered session retains its original task across restart');
+  sid = backendSid;
+  assert.equal(payload(await call('workbench')).task.id, dataTask.id,
+    'a chat explicitly switched to another worktree retains its new task after server restart');
+  assert.match(text(await call('read_text_file', { path: 'data-only.txt' })), /DATA_TASK_WORKTREE_ONLY/,
+    'recovered switched chat reads from its destination worktree, not its previous one');
+  sid = preRestartSid;
   const afterPreviewRestart = await adminRequest('/api/workbench');
   assert.equal(afterPreviewRestart.portLeases.some(lease => lease.taskId === secondTask.id), false, 'restart reconciles a stale preview lease after managed processes shut down');
   const restartedPreviewStatus = await adminRequest(`/api/workbench/tasks/${secondTask.id}/preview`);

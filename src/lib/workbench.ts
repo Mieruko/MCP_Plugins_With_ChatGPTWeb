@@ -2450,6 +2450,78 @@ export async function targetAgentSession(
   });
 }
 
+/**
+ * A chat may explicitly move to an existing task in its OWN workspace without
+ * enabling machine-wide control. This never creates workspaces/tasks and never
+ * changes the dashboard selection or another chat's binding. Cross-workspace
+ * targeting continues to use targetAgentSession's Full/machine gate.
+ */
+export async function switchSessionTask(
+  sessionId: string,
+  clientType: AgentClientType,
+  input: { taskId?: string; taskTitle?: string },
+  authority: ControlAuthority,
+) {
+  if (!sessionId || authority.sessionId !== sessionId) throw new Error("CONTROL_SESSION_CHANGED: target must use the current session.");
+  return exclusive(async () => workspaceExclusive(authority.taskId, async () => {
+    const source = assertControlSession(authority);
+    const workspace = workspaceById(source.workspaceId);
+    if (workspace.experience !== "advanced") {
+      throw new Error("ADVANCED_REQUIRED: switching between tasks in a workspace requires Advanced mode.");
+    }
+    if (!input.taskId && !input.taskTitle?.trim()) {
+      throw new Error("TASK_TARGET_REQUIRED: specify an existing task_id or task_title.");
+    }
+    assertControlIdle(source, sessionId);
+    await assertWorkspaceReady(workspace);
+
+    const matches = state.tasks.filter(item => item.workspaceId === workspace.id && taskAcceptsWork(item)
+      && (!input.taskId || item.id === input.taskId)
+      && (!input.taskTitle || item.title.trim().toLocaleLowerCase() === input.taskTitle.trim().toLocaleLowerCase()));
+    if (matches.length > 1) throw new Error(`TASK_TARGET_AMBIGUOUS: multiple open tasks named ${input.taskTitle}; specify task_id.`);
+    const target = matches[0];
+    if (!target) throw new Error("TASK_TARGET_NOT_FOUND: existing task not found in this chat's workspace; no task or workspace was created.");
+    if (target.id !== source.id && state.agentAssignments.some(item => item.taskId === target.id
+      && item.status === "queued" && Date.parse(item.expiresAt) > Date.now())) {
+      throw new Error("TASK_TARGET_RESERVED: this task is queued for another ChatGPT session; cancel its reservation before targeting it explicitly.");
+    }
+    const otherSession = state.agentBindings.some(binding => binding.taskId === target.id
+      && binding.sessionId !== sessionId && !binding.closedAt);
+    if (otherSession) throw new Error("TASK_TARGET_IN_USE: another chat is already bound to this task; use that chat or choose an unassigned task.");
+    const executionPath = taskExecutionPath(target);
+    if (state.agentBindings.some(binding => binding.sessionId !== sessionId && !binding.closedAt
+      && state.tasks.some(item => item.id === binding.taskId
+        && workspacePathKey(taskExecutionPath(item)) === workspacePathKey(executionPath)))) {
+      throw new Error("TASK_TARGET_SHARED_CHECKOUT: another chat uses the same checkout; choose an isolated worktree task.");
+    }
+    if (!await fs.stat(executionPath).then(stat => stat.isDirectory()).catch(() => false)) {
+      throw new Error("TASK_TARGET_WORKTREE_MISSING: task execution folder is unavailable; restore it before switching.");
+    }
+
+    const binding = state.agentBindings.find(item => item.sessionId === sessionId && !item.closedAt);
+    if (!binding || binding.taskId !== source.id) throw new Error("CONTROL_SESSION_CHANGED: task binding changed while switching.");
+    if (target.id !== source.id) {
+      closeActiveReviewRuns(source.id, "interrupted", sessionId);
+      binding.taskId = target.id;
+      binding.clientType = clientType;
+      binding.lastSeenAt = new Date().toISOString();
+      cancelAssignment(state, target.id);
+      await save({ scopes: ["tasks"], taskId: target.id, reason: "session-switched-task" });
+    }
+    return {
+      authoritative: true,
+      created: { workspace: false, task: false },
+      previousTaskId: source.id,
+      workspace: { id: workspace.id, name: workspace.name, path: workspace.path, experience: workspace.experience },
+      task: { id: target.id, title: target.title, kind: target.kind, lifecycle: target.lifecycle,
+        executionPath, branch: target.execution.branch || null },
+      session: { id: sessionId, clientType, retargeted: source.id !== target.id },
+      dashboard_selection_unchanged: true,
+      message: "This chat was bound to the requested existing task. Other sessions and the dashboard selection were not changed.",
+    };
+  }));
+}
+
 export async function setTaskDescription(id: string, description: string): Promise<Task> {
   return exclusive(async () => {
     const task = taskById(id);

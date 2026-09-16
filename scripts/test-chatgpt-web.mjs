@@ -101,6 +101,8 @@ try {
       assert.ok(elapsed < 2000, `SSE blocked POST: ${elapsed}ms`);
       assert.ok(data.result.tools.some(t => t.name === 'inspect_code'));
       assert.ok(data.result.tools.some(t => t.name === 'stop_process'));
+      assert.match(data.result.tools.find(t => t.name === 'workbench_control')?.description || '', /SWITCH THIS CHAT.*EXISTING task/i,
+        'MCP discovery explains how an existing chat switches a task without machine access');
       const read = await rpc(sid, 'tools/call', { name: 'inspect_code', arguments: { requests: [{ kind: 'read', path: 'b.ts' }] } }, endpoint);
       assert.equal(read.data.result.structuredContent.ok, true);
       console.log(`OK ${endpoint}: tools/list with SSE still open (${elapsed}ms)`);
