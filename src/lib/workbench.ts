@@ -17,6 +17,7 @@ import {
   claimSessionTask,
   closeAgentBinding as closeBinding,
   migrateLegacySessionTasks,
+  pruneExpiredAgentAssignments,
   queueAgentAssignment as queueAssignment,
   type AgentAssignment,
   type AgentBinding,
@@ -85,7 +86,12 @@ export interface TaskIntegration {
   finishedAt?: string;
   discardedAt?: string;
 }
-export interface Task { id: string; workspaceId: string; title: string; description?: string; handoff?: TaskHandoff; workspace: string; execution: TaskExecution; createdAt: string; completedAt?: string; policy: Policy; kind: TaskKind; lifecycle: TaskLifecycle; integration?: TaskIntegration; preview?: TaskPreview }
+export interface TaskDelegationScope {
+  canReadStatus: boolean;
+  canReadHandoff: boolean;
+  canRequestMerge: boolean;
+}
+export interface Task { id: string; workspaceId: string; title: string; description?: string; handoff?: TaskHandoff; workspace: string; execution: TaskExecution; createdAt: string; completedAt?: string; policy: Policy; kind: TaskKind; lifecycle: TaskLifecycle; integration?: TaskIntegration; preview?: TaskPreview; parentTaskId?: string; createdBySessionId?: string; delegationScope?: TaskDelegationScope }
 export interface TaskCheckpoint { id: string; taskId: string; title: string; createdAt: string; operationIndex: number }
 export interface AgentSessionSnapshot {
   id: string;
@@ -131,6 +137,7 @@ export interface AgentCoordinatorView {
   active: boolean;
   queued: boolean;
   createdAt: string;
+  assignmentExpiresAt?: string;
   lastSeenAt?: string;
   changedPaths: string[];
   changeCoverage: "base_to_worktree" | "working_tree" | "unavailable";
@@ -194,14 +201,40 @@ export interface OperationReview {
   truncated: boolean;
   warning?: string;
 }
+export type PermissionDecisionKind = "allow" | "prompt" | "block";
+export type PermissionRisk = "read" | "edit" | "command" | "destructive" | "control";
+export type PermissionRiskLevel = "low" | "medium" | "high";
+export type PermissionEffect = "files" | "process" | "git" | "network" | "task_metadata" | "workspace_control" | "external";
+export interface PermissionDecision {
+  decision: PermissionDecisionKind;
+  risk: PermissionRisk;
+  riskLevel: PermissionRiskLevel;
+  effects: PermissionEffect[];
+  reasonCode: string;
+  reason: string;
+  preset: PermissionMode;
+}
 export interface Operation {
-  id: string; taskId: string; sessionId?: string; changeSetId?: string; tool: string; args: Args; createdAt: string; expiresAt: number;
+  id: string; taskId: string; sessionId?: string; changeSetId?: string; reviewRunId?: string; tool: string; args: Args; createdAt: string; expiresAt: number;
   policyRevision: number; status: "pending" | "running" | "completed" | "failed" | "denied" | "expired" | "interrupted";
   changes: Change[]; error?: string; result?: unknown;
   review?: OperationReview;
+  permission?: PermissionDecision;
   tracking: "file-tools" | "task-metadata" | "external-effects-not-tracked";
 }
-interface State { version: 5; workspaces: Workspace[]; tasks: Task[]; operations: Operation[]; checkpoints?: TaskCheckpoint[]; selectedWorkspaceId?: string; selectedTaskId?: string; agentBindings: AgentBinding[]; agentAssignments: AgentAssignment[]; portLeases: PortLease[] }
+export interface ReviewRun {
+  id: string;
+  workspaceId: string;
+  taskId: string;
+  sessionId?: string;
+  turnKeyHash?: string;
+  identitySource: "host" | "explicit" | "fallback" | "local";
+  startedAt: string;
+  updatedAt: string;
+  closedAt?: string;
+  status: "open" | "completed" | "interrupted";
+}
+interface State { version: 5; revision?: number; workspaces: Workspace[]; tasks: Task[]; operations: Operation[]; reviewRuns?: ReviewRun[]; checkpoints?: TaskCheckpoint[]; selectedWorkspaceId?: string; selectedTaskId?: string; agentBindings: AgentBinding[]; agentAssignments: AgentAssignment[]; portLeases: PortLease[] }
 const events = new EventEmitter();
 export type WorkbenchChangeScope = "state" | "workspaces" | "tasks" | "operations" | "checkpoints" | "workspace";
 export interface WorkbenchChange {
@@ -209,9 +242,16 @@ export interface WorkbenchChange {
   taskId?: string;
   operationId?: string;
   reason?: string;
+  revision?: number;
 }
 const genericWorkbenchChange = (): WorkbenchChange => ({ scopes: ["state"] });
-export function notifyWorkbench(change: WorkbenchChange = genericWorkbenchChange()) { events.emit("change", change); }
+const workbenchEventBuffer: WorkbenchChange[] = [];
+const WORKBENCH_EVENT_BUFFER_LIMIT = 256;
+function emitWorkbenchChange(change: WorkbenchChange): void {
+  const enriched = { ...change, revision: change.revision ?? state?.revision ?? 0 };
+  events.emit("change", enriched);
+}
+export function notifyWorkbench(change: WorkbenchChange = genericWorkbenchChange()) { emitWorkbenchChange(change); }
 const callbacks = new Map<string, () => Promise<unknown>>();
 let state: State;
 let initialization: Promise<void> | undefined;
@@ -219,7 +259,7 @@ let globalQueue = Promise.resolve();
 let saveQueue = Promise.resolve();
 let portLeaseQueue = Promise.resolve();
 const workspaceQueues = new Map<string, Promise<void>>();
-const activeChangeSets = new Map<string, { id: string; startedAt: number; lastAt: number }>();
+const activeChangeSets = new Map<string, { id: string; startedAt: number; lastAt: number; turnKeyHash?: string }>();
 let stateOwnerLockPath = "";
 let stateOwnerClaim: Promise<void> | undefined;
 const MAX_BYTES = 32 * 1024 * 1024;
@@ -462,6 +502,14 @@ async function normalizeLoadedState(raw: any): Promise<State> {
     const migratedAt = new Date().toISOString();
     const next = raw as State & { version: number; sessionTasks?: Record<string, string> };
     next.version = 5;
+    next.revision ??= 0;
+    next.reviewRuns ??= [];
+    for (const run of next.reviewRuns) {
+      if (run.status !== "open") continue;
+      run.status = "interrupted";
+      run.closedAt = migratedAt;
+      run.updatedAt = migratedAt;
+    }
     next.checkpoints ??= [];
     next.agentBindings ??= migrateLegacySessionTasks(next.sessionTasks, migratedAt);
     next.agentAssignments ??= [];
@@ -487,8 +535,44 @@ async function normalizeLoadedState(raw: any): Promise<State> {
         delete task.preview.startedAt;
       }
     }
+    for (const task of next.tasks) {
+      if (!task.parentTaskId) continue;
+      const parent = next.tasks.find(item => item.id === task.parentTaskId);
+      if (!parent || parent.id === task.id || parent.workspaceId !== task.workspaceId) {
+        delete task.parentTaskId;
+        delete task.delegationScope;
+        continue;
+      }
+      task.delegationScope ??= { canReadStatus: true, canReadHandoff: true, canRequestMerge: false };
+    }
+    for (const operation of next.operations) {
+      if (!operation.permission) continue;
+      operation.permission.riskLevel ??= operation.permission.risk === "read" || operation.permission.risk === "edit"
+        ? "low"
+        : operation.permission.risk === "command" ? "medium" : "high";
+      operation.permission.reasonCode ??= operation.permission.decision === "block"
+        ? "workspace_unclassified"
+        : operation.permission.decision === "prompt"
+          ? "approval_required"
+          : operation.permission.risk === "read"
+            ? "read_only"
+            : operation.permission.preset === "full" ? "full_access" : "legacy_allow";
+    }
+    for (const assignment of next.agentAssignments) {
+      const task = next.tasks.find(item => item.id === assignment.taskId);
+      if (!task) continue;
+      assignment.workspaceId ||= task.workspaceId;
+      assignment.clientType ||= "chatgpt";
+      assignment.leaseNonce ||= randomUUID();
+      assignment.status ||= "queued";
+      if (!assignment.expiresAt) {
+        const created = Date.parse(assignment.createdAt);
+        assignment.expiresAt = new Date((Number.isFinite(created) ? created : Date.now()) + 15 * 60_000).toISOString();
+      }
+    }
     next.agentBindings = next.agentBindings.filter(binding => next.tasks.some(task => task.id === binding.taskId));
     next.agentAssignments = next.agentAssignments.filter(assignment => next.tasks.some(task => task.id === assignment.taskId));
+    pruneExpiredAgentAssignments(next);
     const activeTaskIds = new Set(next.tasks.filter(task => !["archived", "completed"].includes(task.lifecycle)).map(task => task.id));
     const keptLeases: PortLease[] = [];
     const keptPorts = new Set<number>();
@@ -514,9 +598,11 @@ async function normalizeLoadedState(raw: any): Promise<State> {
   if (raw.version !== 1) throw new Error("Invalid workbench state");
   const migrated: State = {
     version: 5,
+    revision: 0,
     workspaces: [],
     tasks: [],
     operations: raw.operations,
+    reviewRuns: [],
     checkpoints: raw.checkpoints || [],
     selectedTaskId: raw.selectedTaskId,
     agentBindings: migrateLegacySessionTasks(raw.sessionTasks || {}),
@@ -542,6 +628,8 @@ async function save(change: WorkbenchChange = genericWorkbenchChange()): Promise
   saveQueue = gate;
   await prior;
   try {
+    state.revision = (state.revision || 0) + 1;
+    const emitted = { ...change, revision: state.revision };
     const target = path.join(workbenchRoot(), "state.json");
     const temp = `${target}.${randomUUID()}.tmp`;
     await fs.mkdir(workbenchRoot(), { recursive: true });
@@ -549,7 +637,9 @@ async function save(change: WorkbenchChange = genericWorkbenchChange()): Promise
     // never overwrite newer in-memory state from another workspace.
     await fs.writeFile(temp, JSON.stringify(state), { mode: 0o600 });
     await fs.rename(temp, target);
-    events.emit("change", change);
+    workbenchEventBuffer.push(emitted);
+    if (workbenchEventBuffer.length > WORKBENCH_EVENT_BUFFER_LIMIT) workbenchEventBuffer.splice(0, workbenchEventBuffer.length - WORKBENCH_EVENT_BUFFER_LIMIT);
+    emitWorkbenchChange(emitted);
   } finally {
     release();
   }
@@ -569,7 +659,7 @@ async function init(): Promise<void> {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      state = { version: 5, workspaces: [], tasks: [], operations: [], checkpoints: [], agentBindings: [], agentAssignments: [], portLeases: [] };
+      state = { version: 5, revision: 0, workspaces: [], tasks: [], operations: [], reviewRuns: [], checkpoints: [], agentBindings: [], agentAssignments: [], portLeases: [] };
       const configuredProject = process.env.WORKSPACE_PATH?.split(";")[0]?.trim().replace(/^['"]|['"]$/g, "");
       if (defaultExperience() === "basic" && configuredProject) {
         const workspace = createWorkspaceRecord(await canonicalWorkspacePath(configuredProject));
@@ -657,7 +747,18 @@ async function workspacePathsExclusive<T>(paths: string[], fn: () => Promise<T>)
     }
   }
 }
-export function subscribeWorkbench(listener: (change: WorkbenchChange) => void): () => void {
+export function subscribeWorkbench(listener: (change: WorkbenchChange) => void, afterRevision?: number): () => void {
+  if (Number.isFinite(afterRevision) && (afterRevision || 0) > 0) {
+    const requested = Number(afterRevision);
+    const replay = workbenchEventBuffer.filter(change => Number(change.revision || 0) > requested);
+    const oldest = workbenchEventBuffer[0]?.revision;
+    const current = state.revision || 0;
+    if ((oldest !== undefined && requested < oldest - 1) || (oldest === undefined && requested < current)) {
+      listener({ scopes: ["state"], reason: "revision-gap", revision: state.revision || 0 });
+    } else {
+      for (const change of replay) listener(change);
+    }
+  }
   events.on("change", listener);
   return () => { events.off("change", listener); };
 }
@@ -1164,10 +1265,7 @@ function interruptPendingTaskOperations(task: Task, reason: string): number {
     operation.error = reason;
     count++;
   }
-  for (const binding of state.agentBindings) {
-    if (binding.taskId !== task.id) continue;
-    activeChangeSets.delete(changeSetKey(task.id, binding.sessionId));
-  }
+  closeActiveReviewRuns(task.id, "interrupted");
   return count;
 }
 
@@ -1590,7 +1688,7 @@ function experienceView(workspace: Workspace, sessions?: AgentSessionSnapshot[])
       blockers.push({ taskId: task.id, message: `${task.title}: another task still has a connected session.` });
     }
   }
-  if (state.agentAssignments.some(item => ids.has(item.taskId))) {
+  if (state.agentAssignments.some(item => item.status === "queued" && ids.has(item.taskId) && Date.parse(item.expiresAt) > Date.now())) {
     blockers.push({ message: "Cancel queued agent assignments before switching to Basic." });
   }
   const bindings = state.agentBindings.filter(binding => binding.taskId === defaultTask?.id && experienceBindingIsLive(binding, sessions));
@@ -1682,12 +1780,13 @@ export async function getWorkbench(sessions?: AgentSessionSnapshot[]) {
     ...await workspaceAvailability(workspace),
   })));
   return {
+    revision: state.revision || 0,
     workspaces,
     selectedWorkspaceId: state.selectedWorkspaceId,
     selectedTaskId: state.selectedTaskId,
     tasks: structuredClone(state.tasks),
     agentBindings: structuredClone(state.agentBindings),
-    agentAssignments: structuredClone(state.agentAssignments),
+    agentAssignments: structuredClone(state.agentAssignments.filter(assignment => assignment.status === "queued" && Date.parse(assignment.expiresAt) > Date.now())),
     portLeases: structuredClone(state.portLeases),
     experiences: Object.fromEntries(state.workspaces.map(workspace => [workspace.id, experienceView(workspace, sessions)])),
     operations: state.operations.map(publicOperation).reverse(),
@@ -1715,9 +1814,10 @@ function addCoordinatorConflict(target: Map<string, AgentCoordinatorConflict[]>,
 export async function getAgentCoordinator(sessions: AgentSessionSnapshot[] = []) {
   await init();
   const chatGptSessions = sessions.filter(session => session.clientType === "chatgpt");
+  const activeAssignments = state.agentAssignments.filter(assignment => assignment.status === "queued" && Date.parse(assignment.expiresAt) > Date.now());
   const relevantTaskIds = new Set<string>([
     ...chatGptSessions.map(session => session.taskId),
-    ...state.agentAssignments.map(assignment => assignment.taskId),
+    ...activeAssignments.map(assignment => assignment.taskId),
   ]);
   const tasks = state.tasks.filter(task => !["archived", "completed"].includes(task.lifecycle) && relevantTaskIds.has(task.id));
   const taskByIdMap = new Map(tasks.map(task => [task.id, task]));
@@ -1810,7 +1910,7 @@ export async function getAgentCoordinator(sessions: AgentSessionSnapshot[] = [])
       conflicts: structuredClone(conflictsByTask.get(task.id) || []),
     });
   }
-  for (const assignment of state.agentAssignments) {
+  for (const assignment of activeAssignments) {
     const task = taskByIdMap.get(assignment.taskId);
     if (!task) continue;
     const git = gitByTask.get(task.id)!;
@@ -1831,6 +1931,7 @@ export async function getAgentCoordinator(sessions: AgentSessionSnapshot[] = [])
       active: false,
       queued: true,
       createdAt: assignment.createdAt,
+      assignmentExpiresAt: assignment.expiresAt,
       changedPaths: git.changedPaths,
       changeCoverage: git.coverage,
       previewPort: task.preview?.port,
@@ -2114,6 +2215,7 @@ export async function removeWorkspace(id: string, sessions?: AgentSessionSnapsho
       };
 
       state.operations = state.operations.filter(op => !taskIds.has(op.taskId));
+      state.reviewRuns = (state.reviewRuns || []).filter(run => !taskIds.has(run.taskId));
       state.checkpoints = (state.checkpoints || []).filter(checkpoint => !taskIds.has(checkpoint.taskId));
       state.agentBindings = state.agentBindings.filter(binding => !taskIds.has(binding.taskId));
       state.agentAssignments = state.agentAssignments.filter(assignment => !taskIds.has(assignment.taskId));
@@ -2121,7 +2223,10 @@ export async function removeWorkspace(id: string, sessions?: AgentSessionSnapsho
       state.tasks = state.tasks.filter(task => !taskIds.has(task.id));
       state.workspaces = state.workspaces.filter(item => item.id !== workspace.id);
       for (const operationId of operationIds) callbacks.delete(operationId);
-      for (const taskId of taskIds) activeChangeSets.delete(taskId);
+      for (const key of [...activeChangeSets.keys()]) {
+        const taskId = key.slice(0, key.indexOf(":"));
+        if (taskIds.has(taskId)) activeChangeSets.delete(key);
+      }
 
       const selectionWasRemoved = state.selectedWorkspaceId === workspace.id
         || Boolean(state.selectedTaskId && taskIds.has(state.selectedTaskId));
@@ -2155,7 +2260,7 @@ export async function createTask(
   workspacePath?: string,
   workspaceId?: string,
   environment?: { mode?: "local" | "worktree"; startingRef?: string },
-  options?: { kind?: TaskKind; assignNextChatgpt?: boolean; description?: string; select?: boolean; controlAuthority?: ControlAuthority },
+  options?: { kind?: TaskKind; assignNextChatgpt?: boolean; description?: string; select?: boolean; controlAuthority?: ControlAuthority; parentTaskId?: string; createdBySessionId?: string; delegationScope?: Partial<TaskDelegationScope> },
 ): Promise<Task> {
   return controlExclusive(options?.controlAuthority, async () => {
     let workspace: Workspace;
@@ -2167,12 +2272,22 @@ export async function createTask(
     }
     await assertWorkspaceReady(workspace);
     if (workspace.experience === "basic") throw new Error("ADVANCED_REQUIRED: switch this project to Advanced to create additional tasks.");
+    let parent: Task | undefined;
+    if (options?.parentTaskId) {
+      parent = taskById(options.parentTaskId);
+      if (parent.workspaceId !== workspace.id) throw new Error("TASK_PARENT_WORKSPACE: parent and child tasks must belong to the same workspace");
+      if (!taskAcceptsWork(parent)) throw new Error(`TASK_PARENT_STATE: parent task cannot delegate while lifecycle is ${parent.lifecycle}`);
+    }
     const mode: PermissionMode = process.env.WORKBENCH_DEFAULT_MODE === "full" ? "full" : process.env.WORKBENCH_DEFAULT_MODE === "auto" ? "auto" : "ask";
     const taskId = randomUUID();
+    if (options?.assignNextChatgpt && environment?.mode === "local") {
+      throw new Error("AGENT_ASSIGNMENT_ISOLATION_REQUIRED: a task reserved for another ChatGPT session must use a managed worktree");
+    }
+    const environmentMode = environment?.mode || (options?.assignNextChatgpt ? "worktree" : "local");
     let execution = localExecution(workspace.path);
     let integration: TaskIntegration | undefined;
-    if (environment?.mode === "worktree") {
-      const startingRef = (environment.startingRef || "HEAD").trim() || "HEAD";
+    if (environmentMode === "worktree") {
+      const startingRef = (environment?.startingRef || "HEAD").trim() || "HEAD";
       const baseOid = await runControlGit(workspace.path, ["rev-parse", "--verify", `${startingRef}^{commit}`]);
       const targetBranch = await runControlGit(workspace.path, ["branch", "--show-current"]);
       if (!targetBranch) throw new Error("Parallel integration requires the project workspace to be checked out on a branch");
@@ -2190,10 +2305,18 @@ export async function createTask(
       integration = { targetBranch };
     }
     const description = options?.description?.trim().slice(0, 4000) || undefined;
+    const delegationScope = parent ? {
+      canReadStatus: options?.delegationScope?.canReadStatus ?? true,
+      canReadHandoff: options?.delegationScope?.canReadHandoff ?? true,
+      canRequestMerge: options?.delegationScope?.canRequestMerge ?? false,
+    } : undefined;
     const task: Task = { id: taskId, workspaceId: workspace.id, title: title.slice(0, 200), ...(description ? { description } : {}), workspace: workspace.path, execution, createdAt: new Date().toISOString(),
-      policy: { mode, workspaceOnly: mode !== "full", revision: 1 }, kind: options?.kind || (execution.mode === "worktree" ? "parallel" : "standard"), lifecycle: "open", integration };
+      policy: { mode, workspaceOnly: mode !== "full", revision: 1 }, kind: options?.kind || (execution.mode === "worktree" ? "parallel" : "standard"), lifecycle: "open", integration,
+      ...(parent ? { parentTaskId: parent.id, delegationScope } : {}),
+      ...(options?.createdBySessionId ? { createdBySessionId: options.createdBySessionId } : {}),
+    };
     state.tasks.push(task);
-    if (options?.assignNextChatgpt) queueAssignment(state, task.id);
+    if (options?.assignNextChatgpt) queueAssignment(state, task.id, task.workspaceId);
     if (options?.select) {
       workspace.lastOpenedAt = new Date().toISOString();
       state.selectedWorkspaceId = workspace.id;
@@ -2296,7 +2419,7 @@ export async function targetAgentSession(
       const previousTask = state.tasks.find(item => item.id === binding.taskId);
       const previousWorkspace = previousTask ? state.workspaces.find(item => item.id === previousTask.workspaceId) : undefined;
       if (previousWorkspace?.writer?.sessionId === sessionId) delete previousWorkspace.writer;
-      activeChangeSets.delete(changeSetKey(binding.taskId, sessionId));
+      closeActiveReviewRuns(binding.taskId, "interrupted", sessionId);
       binding.taskId = task.id;
       binding.clientType = clientType;
       binding.lastSeenAt = now;
@@ -2311,7 +2434,7 @@ export async function targetAgentSession(
         createdAt: now, lastSeenAt: now,
       });
     }
-    state.agentAssignments = state.agentAssignments.filter(item => item.taskId !== task!.id);
+    cancelAssignment(state, task.id);
     workspace.lastOpenedAt = now;
     state.selectedWorkspaceId = workspace.id;
     state.selectedTaskId = task.id;
@@ -2569,6 +2692,7 @@ export async function resolveDefaultTask(workspace: string): Promise<string> {
 }
 export async function resolveSessionTask(sessionId: string, workspace: string, clientType: AgentClientType = "mcp"): Promise<string> {
   return exclusive(async () => {
+    pruneExpiredAgentAssignments(state);
     const taskExists = (taskId: string) => state.tasks.some(task => task.id === taskId && !["archived", "completed"].includes(task.lifecycle));
     const bound = state.agentBindings.find(binding => binding.sessionId === sessionId);
     if (bound) {
@@ -2592,17 +2716,27 @@ export async function resolveSessionTask(sessionId: string, workspace: string, c
       return claimed.taskId;
     }
 
-    // ChatGPT reservations are global and deterministic. Claim a queued task
-    // before consulting the dashboard selection. Without a reservation, only
-    // a *new* ChatGPT conversation follows the current Workbench selection;
-    // existing conversations remain pinned by the binding check above.
+    // A unique queued ChatGPT reservation wins independently of the dashboard.
+    // With several reservations, use the selected workspace as the explicit
+    // scope and claim its oldest lease atomically. Never use a global FIFO:
+    // an unrelated workspace must not consume another project's reservation.
     if (clientType === "chatgpt") {
-      const assignment = state.agentAssignments.find(item => taskExists(item.taskId));
+      const assignments = state.agentAssignments
+        .filter(item => item.status === "queued" && item.clientType === "chatgpt" && taskExists(item.taskId))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      const scopedAssignments = assignments.length > 1
+        ? assignments.filter(item => item.workspaceId === state.selectedWorkspaceId)
+        : assignments;
+      if (assignments.length > 1 && !scopedAssignments.length) {
+        throw new Error("AGENT_ASSIGNMENT_AMBIGUOUS: ChatGPT task leases are waiting in other workspaces; select the intended workspace before opening another session");
+      }
+      const assignment = scopedAssignments[0];
       if (assignment) {
         const claimed = claimSessionTask(state, {
           sessionId,
           clientType,
           fallbackTaskId: assignment.taskId,
+          workspaceId: assignment.workspaceId,
           taskExists,
         });
         await save({ scopes: ["tasks"], taskId: claimed.taskId, reason: "agent-assignment-claimed" });
@@ -2617,6 +2751,7 @@ export async function resolveSessionTask(sessionId: string, workspace: string, c
       sessionId,
       clientType,
       fallbackTaskId,
+      ...(clientType === "chatgpt" && state.selectedWorkspaceId ? { workspaceId: state.selectedWorkspaceId } : {}),
       taskExists,
     });
     await save({ scopes: ["workspaces", "tasks"], taskId: claimed.taskId, reason: "session-task-bound" });
@@ -2631,7 +2766,10 @@ export async function queueAgentTaskAssignment(taskId: string): Promise<AgentAss
     await assertWorkspaceReady(workspace);
     if (workspace.experience === "basic") throw new Error("ADVANCED_REQUIRED: Basic conversations automatically use the project's default task.");
     if (!taskAcceptsWork(task)) throw new Error(`Task cannot accept a new agent while lifecycle is ${task.lifecycle}`);
-    const assignment = queueAssignment(state, task.id);
+    if (task.execution.mode !== "worktree" || !task.execution.managed) {
+      throw new Error("AGENT_ASSIGNMENT_ISOLATION_REQUIRED: queueing another ChatGPT session requires a managed worktree task");
+    }
+    const assignment = queueAssignment(state, task.id, task.workspaceId);
     await save({ scopes: ["tasks"], taskId: task.id, reason: "agent-assignment-queued" });
     return structuredClone(assignment);
   });
@@ -2646,10 +2784,22 @@ export async function cancelAgentTaskAssignment(taskId: string): Promise<boolean
   });
 }
 
+export async function closeSessionReviewRun(sessionId: string): Promise<boolean> {
+  return exclusive(async () => {
+    const binding = state.agentBindings.find(item => item.sessionId === sessionId && !item.closedAt);
+    if (!binding) return false;
+    const closed = closeActiveReviewRuns(binding.taskId, "completed", sessionId);
+    if (!closed) return false;
+    await save({ scopes: ["operations"], taskId: binding.taskId, reason: "review-run-quiescent" });
+    return true;
+  });
+}
+
 export async function markAgentSessionClosed(sessionId: string): Promise<void> {
   await exclusive(async () => {
     const binding = closeBinding(state, sessionId);
     if (!binding) return;
+    closeActiveReviewRuns(binding.taskId, "completed", sessionId);
     await save({ scopes: ["tasks"], taskId: binding.taskId, reason: "agent-session-closed" });
   });
 }
@@ -2680,7 +2830,16 @@ export async function setSessionTaskPolicy(authority: ControlAuthority, mode: Pe
     const op: Operation = { id: randomUUID(), taskId: task.id, sessionId: authority.sessionId, tool: "workbench_control",
       args: { action: "set_policy", mode, workspace_only: workspaceOnly, expected_revision: expectedRevision },
       createdAt: new Date().toISOString(), expiresAt: Date.now(), policyRevision: task.policy.revision,
-      status: "completed", changes: [], tracking: "task-metadata" };
+      status: "completed", changes: [], tracking: "task-metadata",
+      permission: {
+        decision: "allow",
+        risk: "control",
+        riskLevel: "high",
+        effects: ["workspace_control", "task_metadata"],
+        reasonCode: "remote_policy_control",
+        reason: "The owner enabled conversational policy control and the bound task policy revision matched.",
+        preset: previousPolicy.mode,
+      } };
     const result = { task_id: task.id, previous_policy: previousPolicy, policy: { ...task.policy }, operation_id: op.id,
       message: "Task policy updated. Pending approvals were expired, not executed. Full permits authorized file and command operations without Workbench approval. Existing processes are not stopped by a policy change. Connector-side checks are independent." };
     op.result = result;
@@ -2819,25 +2978,85 @@ export async function restoreTaskCheckpoint(id: string): Promise<CheckpointResto
 const READ_TOOLS = new Set(["inspect_code", "read_text_file", "read_multiple_files", "list_directory", "glob", "grep", "search_files", "directory_tree", "get_file_info", "list_allowed_directories", "agent_status", "project_context", "skills", "load_path_rules", "shell_status", "process_status", "process_output", "mcp_servers", "mcp_tools"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch", "replace_regex", "create_directory", "copy_file", "move_file", "remember"]);
 const METADATA_TOOLS = new Set(["task_handoff"]);
-const CHANGE_SET_TOOLS = new Set([...EDIT_TOOLS, "delete_file", "delete_directory"]);
-const CHANGE_SET_IDLE_MS = Math.max(5_000, Number(process.env.WORKBENCH_CHANGE_SET_IDLE_MS || 45_000));
-const CHANGE_SET_MAX_MS = Math.max(CHANGE_SET_IDLE_MS, Number(process.env.WORKBENCH_CHANGE_SET_MAX_MS || 10 * 60_000));
+const CHANGE_SET_IDLE_MS = Math.max(30_000, Number(process.env.WORKBENCH_REVIEW_RUN_IDLE_MS || process.env.WORKBENCH_CHANGE_SET_IDLE_MS || 5 * 60_000));
+const CHANGE_SET_MAX_MS = Math.max(CHANGE_SET_IDLE_MS, Number(process.env.WORKBENCH_REVIEW_RUN_MAX_MS || process.env.WORKBENCH_CHANGE_SET_MAX_MS || 30 * 60_000));
+
+export interface ReviewIdentity {
+  turnKeyHash?: string;
+  source?: ReviewRun["identitySource"];
+}
 
 function changeSetKey(taskId: string, sessionId: string): string {
   return `${taskId}:${sessionId}`;
 }
 
-function operationChangeSetId(taskId: string, sessionId: string | undefined, tool: string, operationId: string): string {
-  if (!sessionId || !CHANGE_SET_TOOLS.has(tool)) return operationId;
+function closeActiveReviewRuns(taskId: string, status: "completed" | "interrupted", sessionId?: string): number {
+  const prefix = `${taskId}:`;
+  const exact = sessionId ? changeSetKey(taskId, sessionId) : undefined;
+  const closedAt = new Date().toISOString();
+  let closed = 0;
+  for (const [key, active] of [...activeChangeSets.entries()]) {
+    if (exact ? key !== exact : !key.startsWith(prefix)) continue;
+    const run = state.reviewRuns?.find(item => item.id === active.id);
+    if (run && run.status === "open") {
+      run.status = status;
+      run.closedAt = closedAt;
+      run.updatedAt = closedAt;
+      closed++;
+    }
+    activeChangeSets.delete(key);
+  }
+  return closed;
+}
+
+function operationChangeSetId(taskId: string, sessionId: string | undefined, operationId: string, identity?: ReviewIdentity): string {
+  if (!sessionId) {
+    const now = new Date().toISOString();
+    const task = taskById(taskId);
+    state.reviewRuns ??= [];
+    state.reviewRuns.push({
+      id: operationId,
+      workspaceId: task.workspaceId,
+      taskId,
+      identitySource: "local",
+      startedAt: now,
+      updatedAt: now,
+      status: "open",
+    });
+    return operationId;
+  }
   const key = changeSetKey(taskId, sessionId);
   const now = Date.now();
   const current = activeChangeSets.get(key);
   const currentWasRestored = current
     ? state.operations.some(op => op.changeSetId === current.id && op.changes.some(change => change.undone))
     : false;
-  if (!current || currentWasRestored || now - current.lastAt > CHANGE_SET_IDLE_MS || now - current.startedAt > CHANGE_SET_MAX_MS) {
-    const next = { id: randomUUID(), startedAt: now, lastAt: now };
+  const turnChanged = Boolean(identity?.turnKeyHash && current && identity.turnKeyHash !== current.turnKeyHash);
+  const fallbackExpired = !identity?.turnKeyHash && Boolean(current && (now - current.lastAt > CHANGE_SET_IDLE_MS || now - current.startedAt > CHANGE_SET_MAX_MS));
+  if (!current || currentWasRestored || turnChanged || fallbackExpired) {
+    if (current) {
+      const previous = state.reviewRuns?.find(item => item.id === current.id);
+      if (previous && previous.status === "open") {
+        previous.status = currentWasRestored ? "interrupted" : "completed";
+        previous.closedAt = new Date(now).toISOString();
+        previous.updatedAt = previous.closedAt;
+      }
+    }
+    const next = { id: randomUUID(), startedAt: now, lastAt: now, ...(identity?.turnKeyHash ? { turnKeyHash: identity.turnKeyHash } : {}) };
     activeChangeSets.set(key, next);
+    const task = taskById(taskId);
+    state.reviewRuns ??= [];
+    state.reviewRuns.push({
+      id: next.id,
+      workspaceId: task.workspaceId,
+      taskId,
+      sessionId,
+      ...(identity?.turnKeyHash ? { turnKeyHash: identity.turnKeyHash } : {}),
+      identitySource: identity?.source || (identity?.turnKeyHash ? "host" : "fallback"),
+      startedAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+      status: "open",
+    });
     return next.id;
   }
   current.lastAt = now;
@@ -2845,11 +3064,23 @@ function operationChangeSetId(taskId: string, sessionId: string | undefined, too
 }
 
 function touchChangeSet(op: Operation): void {
-  if (!op.sessionId || !op.changeSetId || !CHANGE_SET_TOOLS.has(op.tool)) return;
-  const current = activeChangeSets.get(changeSetKey(op.taskId, op.sessionId));
-  if (current?.id === op.changeSetId) current.lastAt = Date.now();
+  if (!op.reviewRunId) return;
+  const now = Date.now();
+  if (op.sessionId) {
+    const current = activeChangeSets.get(changeSetKey(op.taskId, op.sessionId));
+    if (current?.id === op.reviewRunId) current.lastAt = now;
+  }
+  const run = state.reviewRuns?.find(item => item.id === op.reviewRunId);
+  if (run) {
+    run.updatedAt = new Date(now).toISOString();
+    if (!op.sessionId && run.status === "open") {
+      run.status = "completed";
+      run.closedAt = run.updatedAt;
+    }
+  }
 }
 export function isReadOperation(tool: string, args: Args): boolean {
+  if (tool === "mcp_servers" && args.refresh === true) return false;
   return READ_TOOLS.has(tool) || ["git_status", "git_diff", "git_log"].includes(tool)
     || (tool === "task_handoff" && (args.action || "read") === "read")
     || tool === "github" && ["pr_list", "pr_view", "pr_checks", "issue_list", "issue_view"].includes(args.action)
@@ -2860,6 +3091,70 @@ export function isReadOperation(tool: string, args: Args): boolean {
 export function isProcessOperation(tool: string): boolean {
   return tool.startsWith("git_") || tool === "github" || ["run_command", "start_process", "mcp_call", "mcp_servers", "mcp_tools", "shell_reset"].includes(tool)
     || tool.startsWith("upstream_");
+}
+
+function operationRisk(tool: string, args: Args): PermissionRisk {
+  if (isReadOperation(tool, args)) return "read";
+  if (["delete_file", "delete_directory", "git_restore", "git_reset", "git_checkout"].includes(tool)) return "destructive";
+  if (tool === "git_push" || tool === "mcp_call" || (tool === "github" && args.action === "pr_merge")) return "control";
+  if (WORKSPACE_CONTROL_TOOLS.has(tool) || tool === "workbench_control") return "control";
+  if (isProcessOperation(tool)) return "command";
+  return "edit";
+}
+
+function operationEffects(tool: string, args: Args): PermissionEffect[] {
+  const effects = new Set<PermissionEffect>();
+  if (EDIT_TOOLS.has(tool) || ["delete_file", "delete_directory"].includes(tool)) effects.add("files");
+  if (METADATA_TOOLS.has(tool)) effects.add("task_metadata");
+  if (WORKSPACE_CONTROL_TOOLS.has(tool) || tool === "workbench_control") effects.add("workspace_control");
+  if (tool === "rewind" && args.action === "restore") effects.add("files");
+  if (["stop_process", "clear_processes", "shell_reset"].includes(tool)) effects.add("process");
+  if (tool === "workbench_control") {
+    if (["set_policy", "create_task", "target"].includes(args.action)) effects.add("task_metadata");
+    const createsParallelTask = args.action === "create_task"
+      && (args.environment_mode === "parallel" || (!args.environment_mode && (args.delegate_as_child || args.assign_next_chatgpt)));
+    if (createsParallelTask) {
+      effects.add("git");
+      effects.add("files");
+    }
+  }
+  if (tool.startsWith("git_")) { effects.add("git"); effects.add("files"); }
+  if (["git_push", "git_pull", "git_fetch"].includes(tool)) { effects.add("network"); effects.add("external"); }
+  if (["run_command", "start_process", "shell_reset"].includes(tool)) effects.add("process");
+  if (["github", "mcp_call"].includes(tool) || tool.startsWith("upstream_")) { effects.add("network"); effects.add("external"); }
+  if (tool === "mcp_servers" && args.refresh === true) { effects.add("network"); effects.add("external"); }
+  if (isProcessOperation(tool) && !effects.size) effects.add("external");
+  return [...effects];
+}
+
+export function evaluatePermission(policy: Policy, tool: string, args: Args, options: { human?: boolean; workspaceOnly?: boolean } = {}): PermissionDecision {
+  const risk = operationRisk(tool, args);
+  const riskLevel: PermissionRiskLevel = risk === "read" || risk === "edit" ? "low" : risk === "command" ? "medium" : "high";
+  const effects = operationEffects(tool, args);
+  const preset = policy.mode;
+  if (risk === "read") return { decision: "allow", risk, riskLevel, effects, reasonCode: "read_only", reason: "Read-only operations are always allowed.", preset };
+  if (options.human) return { decision: "allow", risk, riskLevel, effects, reasonCode: "local_owner", reason: "The authenticated local Workbench user initiated this operation directly.", preset };
+
+  const classified = EDIT_TOOLS.has(tool) || METADATA_TOOLS.has(tool) || isProcessOperation(tool)
+    || ["delete_file", "delete_directory", ...WORKSPACE_CONTROL_TOOLS].includes(tool);
+  if (options.workspaceOnly && !classified) {
+    return { decision: "block", risk, riskLevel: "high", effects, reasonCode: "workspace_unclassified", reason: "This operation is not classified as safe for workspace-only execution.", preset };
+  }
+  if (preset === "full") return { decision: "allow", risk, riskLevel, effects, reasonCode: "full_access", reason: "Full permits authorized mutations without an approval prompt.", preset };
+  if (preset === "auto" && (EDIT_TOOLS.has(tool) || METADATA_TOOLS.has(tool))) {
+    return { decision: "allow", risk, riskLevel, effects, reasonCode: "auto_safe_edit", reason: "Auto permits routine workspace edits and task metadata updates.", preset };
+  }
+  return {
+    decision: "prompt",
+    risk,
+    riskLevel,
+    effects,
+    reasonCode: "approval_required",
+    reason: preset === "ask"
+      ? "Ask requires approval before mutations."
+      : "Auto requires approval for commands, Git, destructive, control, network, or other external effects.",
+    preset,
+  };
 }
 const SANDBOX_PROCESS_TOOLS = new Set([
   "run_command", "start_process",
@@ -3021,7 +3316,7 @@ async function captureTree(target: string, found: Map<string, Snapshot>): Promis
   if ([...found.values()].reduce((n, s) => n + (s.content?.length || 0), 0) > MAX_BYTES * 4 / 3) throw new Error("Snapshot exceeds 32 MiB; split the operation");
   if (value.kind === "directory") for (const name of await fs.readdir(target)) await captureTree(path.join(target, name), found);
 }
-export async function dispatch(taskId: string, tool: string, args: Args, invoke: () => Promise<unknown>, human = false, sessionId?: string, environment?: Record<string, string>): Promise<any> {
+export async function dispatch(taskId: string, tool: string, args: Args, invoke: () => Promise<unknown>, human = false, sessionId?: string, environment?: Record<string, string>, reviewIdentity?: ReviewIdentity): Promise<any> {
   await init();
   // The localhost Workbench UI is already a direct human-controlled surface.
   // Git actions from that UI must keep working even when a task is configured
@@ -3047,17 +3342,18 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
     if (!human) await assertBasicWriter(task, sessionId);
     const executionRoot = taskExecutionPath(task);
     const workspaceOnly = task.policy.workspaceOnly && !humanGit;
+    const permission = evaluatePermission(task.policy, tool, args, { human, workspaceOnly });
+    if (permission.decision === "block") {
+      throw new Error(`WORKSPACE_SCOPE_BLOCKED: ${permission.reason}`);
+    }
     if (workspaceOnly) {
       await assertWorkspaceOperationAllowed(tool);
-      if (!isProcessOperation(tool) && !READ_TOOLS.has(tool) && !EDIT_TOOLS.has(tool) && !METADATA_TOOLS.has(tool) && !["delete_file", "delete_directory", ...WORKSPACE_CONTROL_TOOLS].includes(tool)) {
-        throw new Error("WORKSPACE_SCOPE_BLOCKED: this operation is not classified as safe for workspace-only mode");
-      }
     }
     const operationId = randomUUID();
-    const changeSetId = operationChangeSetId(taskId, sessionId, tool, operationId);
-    if (sessionId && !CHANGE_SET_TOOLS.has(tool)) activeChangeSets.delete(changeSetKey(taskId, sessionId));
-    const op: Operation = { id: operationId, taskId, ...(sessionId ? { sessionId } : {}), changeSetId, tool, args: structuredClone(args), createdAt: new Date().toISOString(),
+    const changeSetId = operationChangeSetId(taskId, sessionId, operationId, reviewIdentity);
+    const op: Operation = { id: operationId, taskId, ...(sessionId ? { sessionId } : {}), changeSetId, reviewRunId: changeSetId, tool, args: structuredClone(args), createdAt: new Date().toISOString(),
       expiresAt: Date.now() + 15 * 60_000, policyRevision: task.policy.revision, status: "pending", changes: [],
+      permission,
       tracking: METADATA_TOOLS.has(tool) ? "task-metadata" : isProcessOperation(tool) ? "external-effects-not-tracked" : "file-tools" };
     const boundary = { taskId, sessionId, workspace: executionRoot, workspaceOnly, operationId: op.id, environment, capture: async (_paths: string[]) => {} };
     const expected = new Map<string, Snapshot>();
@@ -3126,11 +3422,11 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
     const read = isReadOperation(tool, args);
     if (read) return executionContext.run({ taskId, sessionId, workspace: executionRoot, workspaceOnly, operationId: op.id, environment, capture: async () => {} }, invoke);
     state.operations.push(op);
-    const auto = task.policy.mode === "full" || task.policy.mode === "auto" && (EDIT_TOOLS.has(tool) || METADATA_TOOLS.has(tool));
-    if (!human && !auto) {
+    if (permission.decision === "prompt") {
       callbacks.set(op.id, execute);
       await save({ scopes: ["operations"], taskId, operationId: op.id, reason: "operation-pending" });
       return { content: [{ type: "text", text: JSON.stringify({ status: "approval_required", operation_id: op.id, task_id: taskId,
+        risk: permission.risk, risk_level: permission.riskLevel, effects: permission.effects, reason_code: permission.reasonCode, reason: permission.reason,
         message: "Review and approve this exact operation in the local Workbench. Do not resubmit it. Use workbench operation to get the result." }) }] };
     }
     return execute();
@@ -3138,15 +3434,35 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
 }
 export async function decideOperation(id: string, approve: boolean): Promise<unknown> {
   await init();
-  const taskId = state.operations.find(o => o.id === id)?.taskId;
-  if (!taskId) throw new Error("Operation is no longer pending");
+  const existing = state.operations.find(o => o.id === id);
+  if (!existing) throw new Error("Unknown operation");
+  const taskId = existing.taskId;
   return workspaceExclusive(taskId, async () => {
     const op = state.operations.find(o => o.id === id);
-    if (!op || op.status !== "pending") throw new Error("Operation is no longer pending");
+    if (!op) throw new Error("Unknown operation");
+    // A repeated *same* decision is idempotent, but terminal approvals that were
+    // never applied must stay distinguishable from success. This prevents stale
+    // browser tabs and old API consumers from treating expired/interrupted work
+    // as if an approval had executed it.
+    if (op.status === "expired" || op.status === "interrupted") {
+      throw new Error(`APPROVAL_GONE: operation is ${op.status}; request a new operation`);
+    }
+    if (op.status === "denied") {
+      if (!approve) return structuredClone(op);
+      throw new Error("APPROVAL_DECISION_CONFLICT: operation was already denied");
+    }
+    if (["running", "completed", "failed"].includes(op.status)) {
+      if (approve) return structuredClone(op);
+      throw new Error(`APPROVAL_DECISION_CONFLICT: operation is already ${op.status} after approval`);
+    }
+    if (op.status !== "pending") throw new Error(`APPROVAL_DECISION_CONFLICT: operation is ${op.status}`);
     const invoke = callbacks.get(id); callbacks.delete(id);
     if (!approve) { op.status = "denied"; await save({ scopes: ["operations"], taskId: op.taskId, operationId: op.id, reason: "operation-denied" }); return publicOperation(op); }
     if (!invoke || op.expiresAt < Date.now() || taskById(op.taskId).policy.revision !== op.policyRevision) {
-      op.status = "expired"; await save({ scopes: ["operations"], taskId: op.taskId, operationId: op.id, reason: "operation-expired" }); throw new Error("Approval expired; request a new operation");
+      op.status = "expired";
+      op.error = "Approval expired or was invalidated before execution; request a new operation.";
+      await save({ scopes: ["operations"], taskId: op.taskId, operationId: op.id, reason: "operation-expired" });
+      throw new Error("APPROVAL_GONE: approval expired or was invalidated before execution; request a new operation");
     }
     return invoke();
   });
@@ -3159,7 +3475,7 @@ export async function operationDetail(id: string) {
 }
 
 function changeSetMembers(id: string): Operation[] {
-  const grouped = state.operations.filter(op => op.changeSetId === id);
+  const grouped = state.operations.filter(op => op.reviewRunId === id || op.changeSetId === id);
   if (grouped.length) return grouped.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const legacy = state.operations.find(op => op.id === id && !op.changeSetId);
   return legacy ? [legacy] : [];
@@ -3181,6 +3497,7 @@ function aggregateChangeSetChanges(operations: Operation[]): Change[] {
 function buildChangeSetDetail(id: string) {
   const operations = changeSetMembers(id);
   if (!operations.length) throw new Error("Unknown change set");
+  const run = state.reviewRuns?.find(item => item.id === id);
   const taskId = operations[0].taskId;
   if (operations.some(op => op.taskId !== taskId)) throw new Error("Change set spans multiple tasks");
   const reversible = operations.filter(op => op.tracking === "file-tools" && ["completed", "failed"].includes(op.status) && op.changes.length);
@@ -3199,6 +3516,10 @@ function buildChangeSetDetail(id: string) {
     id,
     taskId,
     sessionId: operations.every(op => op.sessionId === operations[0].sessionId) ? operations[0].sessionId : undefined,
+    reviewRunStatus: run?.status,
+    identitySource: run?.identitySource,
+    startedAt: run?.startedAt || operations[0].createdAt,
+    closedAt: run?.closedAt,
     operationIds: operations.map(op => op.id),
     operationCount: operations.length,
     createdAt: operations[0].createdAt,
@@ -3228,6 +3549,8 @@ export async function changeSetDetail(id: string) {
   return structuredClone(buildChangeSetDetail(id));
 }
 
+export const reviewRunDetail = changeSetDetail;
+
 export async function latestWorkspaceChangeSet(workspaceId: string) {
   await init();
   const workspace = workspaceById(workspaceId);
@@ -3240,8 +3563,10 @@ export async function latestWorkspaceChangeSet(workspaceId: string) {
     && op.changes.length > 0
   );
   if (!latest) return null;
-  return structuredClone(publicChangeSet(buildChangeSetDetail(latest.changeSetId || latest.id)));
+  return structuredClone(publicChangeSet(buildChangeSetDetail(latest.reviewRunId || latest.changeSetId || latest.id)));
 }
+
+export const latestWorkspaceReviewRun = latestWorkspaceChangeSet;
 
 export async function listWorkspaceChangeSets(workspaceId: string) {
   await init();
@@ -3250,9 +3575,11 @@ export async function listWorkspaceChangeSets(workspaceId: string) {
     && (workspace.experience !== "basic" || task.id === workspace.basicTaskId)).map(task => task.id));
   const ids = [...new Set([...state.operations].reverse().filter(op => taskIds.has(op.taskId)
     && op.tracking === "file-tools" && ["completed", "failed"].includes(op.status) && op.changes.length)
-    .map(op => op.changeSetId || op.id))].slice(0, 60);
+    .map(op => op.reviewRunId || op.changeSetId || op.id))].slice(0, 60);
   return ids.map(id => publicChangeSet(buildChangeSetDetail(id)));
 }
+
+export const listWorkspaceReviewRuns = listWorkspaceChangeSets;
 
 async function restore(target: string, value: Snapshot): Promise<void> {
   if (value.kind === "missing") {
@@ -3290,9 +3617,11 @@ export async function undoChangeSet(id: string, redo: boolean): Promise<ReturnTy
     const aggregatePaths = new Set(aggregate.map(change => change.path));
     await executionContext.run({ taskId, sessionId: detail.sessionId, workspace: executionRoot, workspaceOnly: task.policy.workspaceOnly, operationId: id, capture: async () => {} }, async () => {
       // Validate the whole change set before touching disk. This keeps batch Undo/Redo atomic on conflicts.
+      const originals = new Map<string, Snapshot>();
       for (const change of aggregate) {
         await validatePath(change.path);
         const current = await snapshot(change.path);
+        originals.set(change.path, current);
         const expected = redo ? change.before : change.after;
         if (fingerprint(current) !== fingerprint(expected)) throw new Error(`UNDO_CONFLICT: ${change.path} changed since this change set was recorded`);
         const target = redo ? change.after : change.before;
@@ -3310,23 +3639,44 @@ export async function undoChangeSet(id: string, redo: boolean): Promise<ReturnTy
         if (av.kind !== "missing" && bv.kind === "missing") return -1;
         return av.kind === "missing" ? b.path.length - a.path.length : a.path.length - b.path.length;
       });
-      for (const change of ordered) {
-        await restore(change.path, redo ? change.after : change.before);
-        for (const record of contributions.get(change.path) || []) record.undone = !redo;
-        await save({ scopes: ["operations", "workspace"], taskId, operationId: operations.at(-1)?.id, reason: redo ? "change-set-redone" : "change-set-undone" });
+      const restored: Change[] = [];
+      try {
+        for (const change of ordered) {
+          await restore(change.path, redo ? change.after : change.before);
+          restored.push(change);
+        }
+      } catch (error) {
+        const rollbackErrors: string[] = [];
+        // Revert in the opposite order so directory/file dependencies are restored safely.
+        for (const change of [...restored].reverse()) {
+          try { await restore(change.path, originals.get(change.path)!); }
+          catch (rollbackError) { rollbackErrors.push(`${change.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`); }
+        }
+        const originalError = error instanceof Error ? error.message : String(error);
+        if (rollbackErrors.length) {
+          throw new Error(`CHANGE_SET_RESTORE_FAILED: ${originalError}; rollback also failed for ${rollbackErrors.join("; ")}`);
+        }
+        throw new Error(`CHANGE_SET_RESTORE_FAILED: ${originalError}; restored files were rolled back`);
       }
-      // Net-zero paths do not require disk writes, but their journal state still follows the batch action.
-      for (const [pathValue, records] of contributions) {
-        if (aggregatePaths.has(pathValue)) continue;
-        for (const record of records) record.undone = !redo;
+      // Journal state changes only after every disk mutation succeeded. Net-zero
+      // paths need no disk write but still follow the same ReviewRun action.
+      for (const records of contributions.values()) for (const record of records) record.undone = !redo;
+      if (detail.sessionId) closeActiveReviewRuns(taskId, "interrupted", detail.sessionId);
+      else {
+        const run = state.reviewRuns?.find(item => item.id === id);
+        if (run && run.status === "open") {
+          run.status = "interrupted";
+          run.closedAt = new Date().toISOString();
+          run.updatedAt = run.closedAt;
+        }
       }
-      if ([...contributions.keys()].some(pathValue => !aggregatePaths.has(pathValue))) {
-        await save({ scopes: ["operations", "workspace"], taskId, operationId: operations.at(-1)?.id, reason: redo ? "change-set-redone" : "change-set-undone" });
-      }
+      await save({ scopes: ["operations", "workspace"], taskId, operationId: operations.at(-1)?.id, reason: redo ? "change-set-redone" : "change-set-undone" });
     });
     return publicChangeSet(buildChangeSetDetail(id));
   });
 }
+
+export const undoReviewRun = undoChangeSet;
 
 export async function undoOperation(id: string, redo: boolean, file?: string): Promise<void> {
   await init();

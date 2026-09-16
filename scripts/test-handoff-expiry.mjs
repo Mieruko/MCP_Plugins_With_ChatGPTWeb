@@ -27,7 +27,7 @@ try {
   assert.equal((await wb.operationDetail(pending.operation_id)).status, 'expired');
   assert.equal(invoked, 0);
   assert.equal((await wb.getWorkbench()).tasks.find(t => t.id === id).handoff, undefined);
-  await assert.rejects(wb.decideOperation(pending.operation_id, true), /no longer pending/);
+  await assert.rejects(wb.decideOperation(pending.operation_id, true), /APPROVAL_GONE/);
   console.log('OK expired handoff approval never invokes or writes, and cannot replay');
 } finally {
   Date.now = now;

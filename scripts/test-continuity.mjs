@@ -130,7 +130,7 @@ try {
     assert.equal(await handoff(a), null);
     assert.equal((await request('/api/workbench')).operations.filter(op => op.taskId === taskId).length, 1);
     await decide(pending.operation_id);
-    await decide(pending.operation_id, true, 400);
+    assert.equal((await decide(pending.operation_id)).status, 'completed', 'repeating the same applied approval is idempotent');
     const saved = await handoff(a);
     assert.equal(saved.summary, 'Goal A; tests pending');
     const b = await connect();
@@ -151,13 +151,13 @@ try {
     assert.deepEqual(await handoff(a), saved);
     const stalePolicy = payload(ok(await call(a, 'task_handoff', { action: 'update', summary: 'Stale policy' })));
     await policy(taskId, 'auto', true);
-    await decide(stalePolicy.operation_id, true, 400);
+    await decide(stalePolicy.operation_id, true, 410);
     assert.deepEqual(await handoff(a), saved);
     ok(await call(a, 'task_handoff', { action: 'update', summary: 'Auto' }));
     await policy(taskId, 'ask', true);
     const staleWriter = payload(ok(await call(a, 'task_handoff', { action: 'update', summary: 'Stale writer' })));
     await take(workspace.id, b, a);
-    await decide(staleWriter.operation_id, true, 400);
+    await decide(staleWriter.operation_id, true, 410);
     assert.equal((await handoff(b)).summary, 'Auto');
     await policy(taskId, 'full', true);
     ok(await call(b, 'task_handoff', { action: 'update', summary: 'Full' }));

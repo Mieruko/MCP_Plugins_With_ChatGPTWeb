@@ -455,11 +455,14 @@
       <div class="permission-workspace"><small>Applies to</small><strong id="permission-workspace-name">—</strong><code id="permission-workspace-path">—</code></div>
       <fieldset class="permission-options">
         <legend>Permission mode</legend>
-        <label class="permission-option"><input type="radio" name="policy-mode" value="ask"><span><strong>Ask before changes</strong><small>Review write and command actions before they run.</small></span></label>
-        <label class="permission-option"><input type="radio" name="policy-mode" value="auto"><span><strong id="policy-auto-label">Allow safe edits</strong><small>Allow supported file edits automatically; commands and Git changes still ask.</small></span></label>
-        <label class="permission-option"><input type="radio" name="policy-mode" value="full"><span><strong id="policy-full-label">No approval prompts</strong><small>Allow changes and commands within the access scope selected below.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="ask"><span><strong>Ask for approval</strong><small>Require approval before files, commands, Git, or control changes run.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="auto"><span><strong id="policy-auto-label">Approve for me</strong><small>Allow routine workspace edits; ask before commands, Git, destructive, control, network, or external effects.</small></span></label>
+        <label class="permission-option"><input type="radio" name="policy-mode" value="full"><span><strong id="policy-full-label">Full access</strong><small>Run authorized operations without Workbench approval prompts.</small></span></label>
       </fieldset>
-      <label class="toggle-row human-toggle"><input id="policy-scope" type="checkbox" checked><span><strong>Restrict access to this workspace</strong><small id="policy-scope-help">ChatGPT can only access files inside this workspace.</small></span></label>
+      <details class="permission-advanced">
+        <summary>Advanced scope</summary>
+        <label class="toggle-row human-toggle"><input id="policy-scope" type="checkbox" checked><span><strong>Restrict process access to this workspace</strong><small id="policy-scope-help">Files and commands stay inside this project sandbox. Turn this off only when the task intentionally needs machine-wide access.</small></span></label>
+      </details>
       <div class="dialog-actions"><button class="secondary-button" data-close-dialog="permissions-dialog" type="button">Cancel</button><button id="save-policy" class="primary-button" type="button">Save permissions</button></div>
     </div>
   </dialog>
@@ -600,6 +603,7 @@
     <div class="dialog-head"><div><small>PATCH REVIEW</small><h2 id="review-title">Review operation</h2></div><button class="icon-button" data-close-dialog="review-dialog" type="button">×</button></div>
     <div class="dialog-body">
       <p id="review-note" class="dialog-note review-note"></p>
+      <p id="review-decision-status" class="review-decision-status" role="status" aria-live="polite" hidden></p>
       <p id="review-error" class="error-copy" hidden></p>
       <div id="review-files" class="review-files"></div>
     </div>

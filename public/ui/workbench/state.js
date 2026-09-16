@@ -28,6 +28,7 @@ export const state = {
   currentAgentSessionId: null,
   currentAgentId: null,
   connected: false,
+  liveRevision: 0,
 };
 
 export function currentWorkspace() {

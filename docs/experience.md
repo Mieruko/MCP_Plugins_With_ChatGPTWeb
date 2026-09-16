@@ -10,8 +10,8 @@ Basic is the recommended v1 experience for everyday coding and the default for n
 - The UI shows the project instead of its internal task. Creating additional tasks and reserving agent assignments requires Advanced, including through the local API.
 - New conversations use the selected Basic project's default task. Existing session bindings remain pinned when the selected project changes.
 - Explorer, editing, shell/process tools, Git, approval review, checkpoints and Undo/Redo remain available. Tool discovery is identical in both experiences.
-- Recent work groups recorded file edits using the existing change-set journal. Review retains line numbers, additions/deletions and syntax coloring. Git changes and staged/unstaged controls remain available when Git access is permitted.
-- The permission UI describes approvals separately from workspace scope. Disabling approval prompts does not itself change the scope checkbox. Workspace-only commands still require the configured OS sandbox.
+- Recent work groups recorded file edits by persisted ReviewRun. A ChatGPT turn can include edits, commands and reads without splitting the review; only net file changes are rendered. Review retains line numbers, additions/deletions and syntax coloring. Git changes and staged/unstaged controls remain available when Git access is permitted.
+- The permission UI presents **Ask for approval**, **Approve for me** and **Full access** as presets, with workspace/machine scope under Advanced scope. Workspace-only commands still require the configured OS sandbox.
 
 ## Write control
 
@@ -34,6 +34,12 @@ Use the experience button or **Settings → Experience**. Basic → Advanced rev
 Advanced → Basic checks active parallel tasks, unresolved worktree cleanup, queued assignments, pending/running operations, managed processes, preview leases and sessions still attached to other active tasks. The response and UI explain blockers. Completed history is retained; Basic's recent-work view follows its default task. Switch to Advanced to inspect other task histories.
 
 Old workspace records without an experience field migrate to Advanced. `WORKBENCH_EXPERIENCE` defaults to `basic` and applies only when creating new workspaces. The state format is additive; existing task IDs, snapshots and session bindings are retained.
+
+## Advanced orchestration
+
+Advanced tasks can reserve ChatGPT assignment leases only when they use managed worktrees. A unique queued lease is claimed atomically regardless of the workspace currently open on the dashboard and records `claimedAt` / `claimedBySessionId`; if multiple leases are waiting without an explicit binding, initialization fails with `AGENT_ASSIGNMENT_AMBIGUOUS` instead of silently choosing by dashboard state. Terminal `claimed`, `expired` and `cancelled` leases are retained in bounded history for diagnostics while the public queue exposes only live `queued` leases. Dashboard task selection does not retarget already-bound conversations.
+
+An orchestrator can create a bounded child task without changing the dashboard-selected task. Parent metadata records `parentTaskId`, the creating session and a delegation scope. A child delegated or reserved for another ChatGPT session defaults to a managed worktree; explicitly local children remain local-only and cannot later be queued for a second ChatGPT session. The parent `workbench(view=children)` view may expose child lifecycle/status and handoff according to that scope, but does not expose raw child operation arguments or results. Managed worktree/integration rules continue to own merge and conflict handling.
 
 ## Implementation
 

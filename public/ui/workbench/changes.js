@@ -5,6 +5,8 @@ import { invalidateRestoredEditorTabs, openFile, openGitDiff, openTextDiff } fro
 import { agentLabel } from './agent-identity.js';
 import { languageForPath } from './monaco.js';
 
+let changesLoadGeneration = 0;
+
 function taskForOperation(operation) {
   return (state.data?.tasks || []).find(task => task.id === operation?.taskId) || null;
 }
@@ -21,6 +23,40 @@ function actionLabel(operation) {
 
 function approvalLabel(operation) {
   return isBasic() ? `ChatGPT wants to ${actionLabel(operation).toLowerCase()}` : operation.tool;
+}
+
+function permissionSummary(operation) {
+  const permission = operation?.permission;
+  if (!permission) return '';
+  const risk = permission.riskLevel || permission.risk || 'unknown';
+  const effects = Array.isArray(permission.effects) && permission.effects.length ? permission.effects.join(', ') : 'workspace';
+  return `${risk} risk · ${effects}`;
+}
+
+function setReviewDecisionState(kind = '', message = '', action = 'approve') {
+  const status = $('review-decision-status');
+  const approve = $('approve-operation');
+  const deny = $('deny-operation');
+  const busy = kind === 'busy';
+  if (status) {
+    status.hidden = !message;
+    status.textContent = message;
+    status.className = `review-decision-status${kind ? ` ${kind}` : ''}`;
+  }
+  if (approve) {
+    approve.disabled = busy;
+    approve.textContent = busy ? (action === 'deny' ? 'Please wait…' : 'Approving…') : (isBasic() ? 'Allow once' : 'Approve once');
+  }
+  if (deny) {
+    deny.disabled = busy;
+    deny.textContent = busy && action === 'deny' ? 'Denying…' : 'Deny';
+  }
+}
+
+function updateLocalOperationStatus(id, status) {
+  const operation = (state.data?.operations || []).find(item => item.id === id);
+  if (operation && status) operation.status = status;
+  renderApprovals();
 }
 
 function connectionExpiryLabel(expiresAt) {
@@ -289,16 +325,16 @@ function renderWorkspaceReview() {
 
   scope.hidden = false;
   const count = files.length;
-  $('workspace-review-title').textContent = `Edited ${count} file${count === 1 ? '' : 's'}`;
-  $('workspace-review-additions').textContent = `+${review.review?.additions || 0}`;
-  $('workspace-review-deletions').textContent = `−${review.review?.deletions || 0}`;
   const task = taskForOperation(review);
   const owner = review.sessionId ? agentLabel(review.sessionId) : 'Local / external';
+  const operationCount = review.operationCount || 1;
+  $('workspace-review-title').textContent = `Edited ${count} file${count === 1 ? '' : 's'} · ${operationCount} operation${operationCount === 1 ? '' : 's'} · ${owner}`;
+  $('workspace-review-additions').textContent = `+${review.review?.additions || 0}`;
+  $('workspace-review-deletions').textContent = `−${review.review?.deletions || 0}`;
   scope.title = isBasic() ? 'Recent ChatGPT work' : `${task?.title || 'Workspace task'} · ${owner} · ${review.operationCount || 1} operation${review.operationCount === 1 ? '' : 's'}`;
 
-  const expanded = Boolean(state.workspaceReviewExpanded && count > 3);
-  list.classList.toggle('expanded', expanded);
-  const visible = expanded ? files : files.slice(0, 3);
+  list.classList.toggle('expanded', true);
+  const visible = files;
   const rows = visible.map(file => {
     const row = el('button', undefined, 'workspace-review-file');
     row.type = 'button';
@@ -313,12 +349,7 @@ function renderWorkspaceReview() {
   });
   list.replaceChildren(...rows);
 
-  more.hidden = count <= 3;
-  more.textContent = expanded ? 'Show less⌃' : `Show ${count - 3} more files⌄`;
-  more.onclick = () => {
-    state.workspaceReviewExpanded = !expanded;
-    renderWorkspaceReview();
-  };
+  more.hidden = true;
 
   const redo = Boolean(review.canRedo && !review.canUndo);
   undo.hidden = !review.canUndo && !review.canRedo;
@@ -346,17 +377,18 @@ function clearWorkspaceReviewError() {
   if (target) target.hidden = true;
 }
 
-async function loadWorkspaceReview() {
+async function loadWorkspaceReview(expectedWorkspaceId = state.workspaceId, generation = changesLoadGeneration) {
   const workspace = currentWorkspace();
-  if (!workspace) {
+  if (!workspace || workspace.id !== expectedWorkspaceId) {
     state.workspaceReview = null;
     state.workspaceReviewId = null;
     state.workspaceReviewExpanded = false;
     renderWorkspaceReview();
     return null;
   }
-  const payload = await api(`/api/workbench/workspaces/${encodeURIComponent(workspace.id)}/latest-change-set`);
-  const review = payload?.changeSet || null;
+  const payload = await api(`/api/workbench/workspaces/${encodeURIComponent(workspace.id)}/review-runs/latest`);
+  if (generation !== changesLoadGeneration || state.workspaceId !== expectedWorkspaceId) return null;
+  const review = payload?.reviewRun || null;
   if ((review?.id || null) !== state.workspaceReviewId) state.workspaceReviewExpanded = false;
   state.workspaceReviewId = review?.id || null;
   state.workspaceReview = review;
@@ -498,7 +530,8 @@ function renderReviewCenter() {
     const task = taskForOperation(operation);
     const owner = operation.sessionId ? agentLabel(operation.sessionId) : 'Local / external';
     const fileCount = operation.review?.files?.length || operation.changes?.length || 0;
-    copy.append(el('strong', approvalLabel(operation)), el('span', isBasic() ? `${fileCount} files · review request` : `${task?.title || 'Workspace task'} · ${owner} · ${fileCount} file${fileCount === 1 ? '' : 's'}`));
+    const permission = permissionSummary(operation);
+    copy.append(el('strong', approvalLabel(operation)), el('span', isBasic() ? `${fileCount} files · ${permission || 'review request'}` : `${task?.title || 'Workspace task'} · ${owner} · ${fileCount} file${fileCount === 1 ? '' : 's'}${permission ? ` · ${permission}` : ''}`));
     head.append(copy, el('span', `+${operation.review?.additions || 0} −${operation.review?.deletions || 0}`, 'review-center-card-meta'));
     const actions = el('div', undefined, 'review-center-card-actions');
     actions.append(reviewCenterActionButton('Review approval', () => openOperationReview(operation.id)));
@@ -540,23 +573,22 @@ function renderReviewCenter() {
     const card = el('article', undefined, 'review-center-recent-card');
     const head = el('div', undefined, 'review-center-card-head');
     const copy = el('div', undefined, 'review-center-card-copy');
-    copy.append(el('strong', isBasic() ? (recent.sessionId ? 'Recent ChatGPT work' : 'Your recent edits') : `${owner} · ${task?.title || 'Workspace task'}`), el('span', `${recentFiles.length} file${recentFiles.length === 1 ? '' : 's'} · ${isBasic() ? 'recent edits' : 'latest recorded change set'}`));
+    copy.append(el('strong', isBasic() ? (recent.sessionId ? 'Recent ChatGPT work' : 'Your recent edits') : `${owner} · ${task?.title || 'Workspace task'}`), el('span', `${recentFiles.length} file${recentFiles.length === 1 ? '' : 's'} · ${isBasic() ? 'recent edits' : 'latest review run'}`));
     head.append(copy, el('span', `+${recent.review?.additions || 0} −${recent.review?.deletions || 0}`, 'review-center-card-meta'));
     const actions = el('div', undefined, 'review-center-card-actions');
-    actions.append(reviewCenterActionButton(isBasic() ? 'Review changes' : 'Review change set', () => openChangeSetReview(recent.id)));
+    actions.append(reviewCenterActionButton(isBasic() ? 'Review changes' : 'Review run', () => openChangeSetReview(recent.id)));
     if (recent.canUndo || recent.canRedo) {
       const redo = Boolean(recent.canRedo && !recent.canUndo);
       actions.append(reviewCenterActionButton(redo ? 'Redo ↷' : 'Undo ↶', () => restoreChangeSet(recent.id, redo)));
     }
     const files = el('div', undefined, 'review-center-recent-files');
-    for (const file of recentFiles.slice(0, 6)) {
+    for (const file of recentFiles) {
       const button = el('button', undefined, 'review-center-recent-file');
       button.type = 'button';
       button.append(el('code', relativeForTask(file.path, task)), el('span', `+${file.additions || 0}`, 'additions'), el('span', `−${file.deletions || 0}`, 'deletions'));
       button.onclick = () => void openChangeSetFileDiff(recent.id, file.path).catch(error => setStatus(error.message));
       files.append(button);
     }
-    if (recentFiles.length > 6) files.append(el('p', `+${recentFiles.length - 6} more files`, 'empty-copy'));
     card.append(head, actions, files);
     recentHost.replaceChildren(card);
   } else {
@@ -710,7 +742,8 @@ function renderApprovals() {
     const head = el('div', undefined, 'approval-card-head');
     const owner = operation.sessionId ? agentLabel(operation.sessionId) : 'Local / external';
     const task = taskForOperation(operation);
-    head.append(el('strong', approvalLabel(operation)), el('span', `${isBasic() ? '' : `${task?.title || 'Workspace task'} · ${owner} · `}${operation.review?.files?.length || operation.changes?.length || 0} files`));
+    const permission = permissionSummary(operation);
+    head.append(el('strong', approvalLabel(operation)), el('span', `${isBasic() ? '' : `${task?.title || 'Workspace task'} · ${owner} · `}${operation.review?.files?.length || operation.changes?.length || 0} files${permission ? ` · ${permission}` : ''}`));
     card.append(head, el('p', operation.review ? `+${operation.review.additions || 0} −${operation.review.deletions || 0} · awaiting approval` : `${owner} · awaiting approval`));
     card.onclick = () => void openOperationReview(operation.id).catch(error => setStatus(error.message));
     return card;
@@ -1003,6 +1036,9 @@ export async function runEnvironmentPrimaryAction() {
 }
 
 export async function loadChanges() {
+  const generation = ++changesLoadGeneration;
+  const expectedTaskId = state.taskId;
+  const expectedWorkspaceId = state.workspaceId;
   if (!state.taskId) {
     state.git = null;
     state.gitOverview = null;
@@ -1017,13 +1053,15 @@ export async function loadChanges() {
     return;
   }
   try {
-    const overview = await api(`/api/workbench/tasks/${state.taskId}/git/overview`);
+    const overview = await api(`/api/workbench/tasks/${expectedTaskId}/git/overview`);
+    if (generation !== changesLoadGeneration || state.taskId !== expectedTaskId || state.workspaceId !== expectedWorkspaceId) return;
     state.gitOverview = overview;
     state.git = overview.status;
     state.gitError = null;
     state.changes = enrichChanges(mergeChanges(state.git));
     state.changeByPath = new Map(state.changes.map(change => [change.path, change]));
   } catch (error) {
+    if (generation !== changesLoadGeneration || state.taskId !== expectedTaskId || state.workspaceId !== expectedWorkspaceId) return;
     state.git = null;
     state.gitOverview = null;
     state.gitError = error.message;
@@ -1031,8 +1069,9 @@ export async function loadChanges() {
     state.changeByPath = new Map();
   }
   try {
-    await loadWorkspaceReview();
+    await loadWorkspaceReview(expectedWorkspaceId, generation);
   } catch (error) {
+    if (generation !== changesLoadGeneration || state.taskId !== expectedTaskId || state.workspaceId !== expectedWorkspaceId) return;
     state.workspaceReview = null;
     state.workspaceReviewId = null;
     state.workspaceReviewExpanded = false;
@@ -1101,13 +1140,16 @@ export async function openOperationReview(id) {
   const reviewNote = $('review-note');
   const additions = operation.review?.additions || 0;
   const deletions = operation.review?.deletions || 0;
+  const permission = permissionSummary(operation);
   reviewNote.replaceChildren(
     el('strong', owner, 'review-owner'),
     el('span', operation.status === 'pending' ? 'Preview before approval' : 'Actual operation diff', `review-mode ${operation.status === 'pending' ? 'pending' : 'actual'}`),
+    ...(permission ? [el('span', permission, 'review-mode pending')] : []),
     el('span', `+${additions}`, 'review-additions'),
     el('span', `−${deletions}`, 'review-deletions'),
   );
   $('review-error').hidden = true;
+  setReviewDecisionState('', '');
   const renderTargets = [];
   const blocks = files.map(file => {
     const block = el('section', undefined, 'review-file');
@@ -1146,7 +1188,7 @@ export async function openOperationReview(id) {
 }
 
 export async function openChangeSetReview(id) {
-  const changeSet = await api(`/api/workbench/change-sets/${encodeURIComponent(id)}`);
+  const changeSet = await api(`/api/workbench/review-runs/${encodeURIComponent(id)}`);
   state.currentOperationId = null;
   state.currentOperationTaskId = null;
   const files = changeSet.review?.files || [];
@@ -1157,7 +1199,7 @@ export async function openChangeSetReview(id) {
   $('review-title').textContent = `${isBasic() ? (changeSet.sessionId ? 'ChatGPT edits' : 'Your edits') : task?.title || 'Workspace task'} · ${files.length} file${files.length === 1 ? '' : 's'}`;
   $('review-note').replaceChildren(
     el('strong', owner, 'review-owner'),
-    el('span', isBasic() ? 'Recent work' : `${changeSet.operationCount || 1} operation${changeSet.operationCount === 1 ? '' : 's'} · current change set`, 'review-mode actual'),
+    el('span', isBasic() ? 'Recent work' : `${changeSet.operationCount || 1} operation${changeSet.operationCount === 1 ? '' : 's'} · current review run`, 'review-mode actual'),
     el('span', `+${additions}`, 'review-additions'),
     el('span', `−${deletions}`, 'review-deletions'),
   );
@@ -1182,7 +1224,7 @@ export async function openChangeSetReview(id) {
     return block;
   });
   $('review-files').replaceChildren(...blocks);
-  if (!blocks.length) $('review-files').append(el('p', 'Change set này không có text diff để hiển thị.', 'empty-copy'));
+  if (!blocks.length) $('review-files').append(el('p', 'Review run này không có text diff để hiển thị.', 'empty-copy'));
   $('review-actions').hidden = true;
   $('review-dialog').showModal();
   await Promise.allSettled(renderTargets.map(async ({ host, file }) => {
@@ -1195,7 +1237,7 @@ export async function openChangeSetReview(id) {
 }
 
 async function openChangeSetFileDiff(id, path) {
-  const changeSet = await api(`/api/workbench/change-sets/${encodeURIComponent(id)}`);
+  const changeSet = await api(`/api/workbench/review-runs/${encodeURIComponent(id)}`);
   const wanted = comparableOperationPath(path, changeSet);
   const file = (changeSet.review?.files || []).find(item => comparableOperationPath(item.path, changeSet) === wanted);
   const renderedDiff = file ? operationFileDiff(changeSet, file) : '';
@@ -1224,7 +1266,7 @@ export async function restoreChangeSet(id, redo) {
   undoButton.textContent = redo ? 'Redoing…' : 'Undoing…';
   setStatus(`${action}ing workspace change set…`);
   try {
-    const next = await api(`/api/workbench/change-sets/${encodeURIComponent(id)}/undo`, { method: 'POST', body: { redo } });
+    const next = await api(`/api/workbench/review-runs/${encodeURIComponent(id)}/undo`, { method: 'POST', body: { redo } });
     const taskId = next?.taskId || current?.taskId || state.taskId;
     const paths = (next?.changes || current?.changes || []).map(change => change.path).filter(Boolean);
     invalidateRestoredEditorTabs({ taskId, changeSetId: id, paths });
@@ -1261,12 +1303,84 @@ export async function openOperationFileDiff(id, path) {
 
 export async function decideCurrentOperation(approve) {
   if (!state.currentOperationId) return;
-  const taskId = state.currentOperationTaskId || (state.data?.operations || []).find(operation => operation.id === state.currentOperationId)?.taskId || state.taskId;
-  await api(`/api/workbench/operations/${state.currentOperationId}/decision`, { method: 'POST', body: { approve } });
-  state.currentOperationId = null;
-  state.currentOperationTaskId = null;
-  $('review-dialog').close();
-  window.dispatchEvent(new CustomEvent('workbench:refresh-request', { detail: { scopes: ['operations', 'workspace'], taskId } }));
+  const operationId = state.currentOperationId;
+  const taskId = state.currentOperationTaskId || (state.data?.operations || []).find(operation => operation.id === operationId)?.taskId || state.taskId;
+  const pendingOperation = (state.data?.operations || []).find(operation => operation.id === operationId);
+  setReviewDecisionState('busy', approve ? 'Approval received · starting operation…' : 'Denying operation…', approve ? 'approve' : 'deny');
+  $('review-error').hidden = true;
+  setStatus(approve ? 'Approval received · running operation…' : 'Denying operation…');
+  if (pendingOperation) pendingOperation.status = approve ? 'running' : 'denied';
+  renderApprovals();
+  try {
+    await api(`/api/workbench/operations/${operationId}/decision`, { method: 'POST', body: { approve } });
+    let latest = null;
+    try { latest = await api(`/api/workbench/operations/${operationId}`); } catch { /* SSE/polling will reconcile shortly. */ }
+    const finalStatus = latest?.status || (approve ? 'completed' : 'denied');
+    updateLocalOperationStatus(operationId, finalStatus);
+    state.currentOperationId = null;
+    state.currentOperationTaskId = null;
+    $('review-actions').hidden = true;
+    if (approve && finalStatus === 'completed') {
+      setReviewDecisionState('success', 'Approved · operation completed.');
+      setStatus('Approved · operation completed');
+    } else if (approve && finalStatus === 'running') {
+      setReviewDecisionState('busy', 'Approved · operation is running…');
+      setStatus('Approved · operation is running…');
+    } else if (finalStatus === 'expired' || finalStatus === 'interrupted') {
+      setReviewDecisionState('error', finalStatus === 'expired'
+        ? 'Approval expired before execution. Request a new operation.'
+        : 'Operation was interrupted before execution. Request a new operation.');
+      setStatus(finalStatus === 'expired' ? 'Approval expired' : 'Operation interrupted');
+    } else if (!approve && finalStatus === 'denied') {
+      setReviewDecisionState('denied', 'Denied · operation will not run.');
+      setStatus('Operation denied');
+    } else if (finalStatus === 'failed') {
+      setReviewDecisionState('error', 'Approved · operation failed. Review the operation details.');
+      setStatus('Approved · operation failed');
+    } else {
+      setReviewDecisionState('success', `${approve ? 'Approved' : 'Decision saved'} · ${finalStatus}.`);
+      setStatus(`${approve ? 'Approved' : 'Decision saved'} · ${finalStatus}`);
+    }
+    window.dispatchEvent(new CustomEvent('workbench:refresh-request', { detail: { scopes: ['operations', 'workspace'], taskId } }));
+  } catch (error) {
+    let latest = null;
+    try { latest = await api(`/api/workbench/operations/${operationId}`); } catch { /* Preserve the optimistic UI only until the next refresh. */ }
+    const stillPending = latest?.status === 'pending';
+    if (latest?.status) updateLocalOperationStatus(operationId, latest.status);
+    else if (pendingOperation) pendingOperation.status = 'pending';
+    if (stillPending || !latest) {
+      state.currentOperationId = operationId;
+      state.currentOperationTaskId = taskId;
+      $('review-actions').hidden = false;
+      setReviewDecisionState('error', 'Approval was not applied. You can try again.');
+    } else {
+      state.currentOperationId = null;
+      state.currentOperationTaskId = null;
+      $('review-actions').hidden = true;
+      if (latest.status === 'completed') {
+        setReviewDecisionState('success', 'Approved · operation completed.');
+        setStatus('Approved · operation completed');
+      } else if (latest.status === 'running') {
+        setReviewDecisionState('busy', 'Approved · operation is already running…');
+        setStatus('Approved · operation is already running…');
+      } else if (latest.status === 'denied') {
+        setReviewDecisionState('denied', 'Denied · operation will not run.');
+        setStatus('Operation denied');
+      } else if (latest.status === 'expired' || latest.status === 'interrupted') {
+        setReviewDecisionState('error', latest.status === 'expired'
+          ? 'Approval expired before execution. Request a new operation.'
+          : 'Operation was interrupted before execution. Request a new operation.');
+        setStatus(latest.status === 'expired' ? 'Approval expired' : 'Operation interrupted');
+      } else {
+        setReviewDecisionState('error', `${approve ? 'Approved' : 'Decision saved'} · operation ${latest.status}.`);
+        setStatus(`Operation ${latest.status}`);
+      }
+    }
+    renderApprovals();
+    window.dispatchEvent(new CustomEvent('workbench:refresh-request', { detail: { scopes: ['operations', 'workspace'], taskId } }));
+    if (latest && latest.status !== 'pending') return;
+    throw error;
+  }
 }
 
 export function openPrimaryReview() {

@@ -28,7 +28,8 @@ const env = { ...process.env, PORT: String(port), ADMIN_PORT: String(adminPort),
   MCP_UPSTREAM_CONFIG: path.join(tmp, 'upstream.json'), AUDIT_LOG_PATH: path.join(tmp, 'audit.log'), CHECKPOINT_PATH: path.join(tmp, 'checkpoints'),
   MCP_SHELL_STATE_DIR: path.join(tmp, 'shell'), CODEX_HOME: path.join(tmp, 'codex'), CHATGPT_TOOL_PROFILE: 'full',
   MCP_ACTIVE_SESSION_MS: '1000',
-  LOCAL_CODER_CONNECTION_MODE: 'local', WORKBENCH_REMOTE_POLICY_CONTROL: 'false',
+  LOCAL_CODER_CONNECTION_MODE: 'local', WORKBENCH_REMOTE_POLICY_CONTROL: 'false', WORKBENCH_REVIEW_QUIESCENCE_MS: '1000',
+  PUBLIC_BASE_URL: base,
   WORKBENCH_PREVIEW_PORT_RANGE: '20000-24999',
   WORKBENCH_SANDBOX_PROVIDER: 'none',
   WORKSPACE_PATHS: '', EXTRA_WORKSPACE_PATHS: '', ALLOWED_WORKSPACE_PATHS: '' };
@@ -68,14 +69,15 @@ async function stop() {
     await closed;
   }
 }
-async function rpc(method, params) {
-  const res = await fetch(base + '/mcp', { method: 'POST', headers: { Authorization: 'Bearer workbench-test-mcp', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(sid ? { 'mcp-session-id': sid } : {}) },
+async function rpc(method, params, extraHeaders = {}) {
+  const res = await fetch(base + '/mcp', { method: 'POST', headers: { Authorization: 'Bearer workbench-test-mcp', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(sid ? { 'mcp-session-id': sid } : {}), ...extraHeaders },
     body: JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params }), signal: AbortSignal.timeout(10000) });
   assert.equal(res.status, 200);
   if (res.headers.get('mcp-session-id')) sid = res.headers.get('mcp-session-id');
   return (await res.json()).result;
 }
-const call = (name, args = {}) => rpc('tools/call', { name, arguments: args });
+const call = (name, args = {}, meta) => rpc('tools/call', { name, arguments: args, ...(meta ? { _meta: meta } : {}) });
+const callWithHeaders = (name, args = {}, headers = {}) => rpc('tools/call', { name, arguments: args }, headers);
 async function rpcWithSession(sessionId, method, params) {
   const res = await fetch(base + '/mcp', { method: 'POST', headers: { Authorization: 'Bearer workbench-test-mcp', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'mcp-session-id': sessionId },
     body: JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params }), signal: AbortSignal.timeout(10000) });
@@ -108,8 +110,10 @@ function sseEvents(response) {
         const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
         if (!frame || frame.startsWith(':')) continue;
         const event = frame.split('\n').find(line => line.startsWith('event:'))?.slice(6).trim() || 'message';
+        const id = frame.split('\n').find(line => line.startsWith('id:'))?.slice(3).trim() || '';
         const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
-        return { event, data: data ? JSON.parse(data) : null };
+        if (!id && !data && !frame.split('\n').some(line => line.startsWith('event:'))) continue;
+        return { event, id, data: data ? JSON.parse(data) : null };
       }
       const { done, value } = await reader.read();
       if (done) throw new Error('SSE stream closed before the next event');
@@ -179,7 +183,11 @@ try {
   assert.match(workbenchHtml, /Project files stay on disk/, 'workspace removal explains that source files are preserved');
   assert.match(workbenchHtml, /What are you working on\?/);
   assert.match(workbenchHtml, /id="new-task-error"/);
-  assert.match(workbenchHtml, /Restrict access to this workspace/);
+  assert.match(workbenchHtml, /Ask for approval/);
+  assert.match(workbenchHtml, /Approve for me/);
+  assert.match(workbenchHtml, /Full access/);
+  assert.match(workbenchHtml, /Advanced scope/);
+  assert.match(workbenchHtml, /Restrict process access to this workspace/);
   assert.match(workbenchHtml, /WORKSPACE REVIEW/);
   assert.match(workbenchHtml, /id="workspace-review-undo"/);
   assert.match(workbenchHtml, /id="workspace-review-more"/);
@@ -267,11 +275,22 @@ try {
   assert.match(appUi, /setupChatSessions\(\)/, 'Workbench bootstraps the multi-chat controller');
   assert.match(appUi, /None configured/, 'empty upstream state avoids a misleading 0\/0 connected counter');
   assert.match(appUi, /\$\('environment-changes'\)\.onclick = \(\) => openReviewCenter\(\)/, 'Environment working-tree status opens Review Center directly');
+  assert.match(appUi, /beforeunload/, 'Workbench closes EventSource and live timers when the page unloads');
+  assert.match(appUi, /fallbackRevision/, 'polling keeps an independent revision cursor so SSE delivery cannot mask a failed fallback refresh');
+  assert.match(appUi, /serverRevision !== beforeRevision/, 'polling reloads secondary views when the server revision advanced since the previous poll');
+  assert.match(appUi, /workbenchLoadGeneration/, 'Workbench state loader rejects stale async responses after task or workspace changes');
+  assert.match(appUi, /generation !== workbenchLoadGeneration/, 'only the newest Workbench state response can update the active view');
+  assert.match(appUi, /selectedPolicyMode\(\) !== 'full'/, 'permission presets default workspace scope consistently');
+  assert.match(appUi, /Machine scope allows authorized commands and paths outside this workspace/, 'permission scope helper explains machine access when workspace restriction is disabled');
+  assert.match(appUi, /policy-scope'\)\.onchange = updatePolicyScopeHelp/, 'permission scope help updates immediately when advanced scope changes');
   const experienceUiResponse = await fetch(admin + '/ui/workbench/experience.js');
   assert.equal(experienceUiResponse.status, 200);
   const experienceUi = await experienceUiResponse.text();
   assert.match(experienceUi, /basic\.disabled = false/, 'Basic remains selectable so downgrade blockers are visible instead of looking like a broken toggle');
   assert.match(experienceUi, /Resolve blockers first/, 'blocked Advanced-to-Basic changes explain why Apply is unavailable');
+  assert.match(experienceUi, /policy-auto-label'\)\.textContent = 'Approve for me'/, 'experience rendering preserves the permission preset label');
+  assert.match(experienceUi, /policy-full-label'\)\.textContent = 'Full access'/, 'experience rendering preserves the Full access label');
+  assert.doesNotMatch(experienceUi, /Allow safe edits|No approval prompts/, 'experience rendering cannot overwrite permission labels with legacy wording');
   assert.doesNotMatch(workbenchHtml, /terminal-command-form|terminal-command|terminal-run|terminal-start/, 'manual terminal command UI is removed');
   assert.match(workbenchHtml, /id="process-console"[^>]*hidden/, 'process console is hidden until a process is running');
   assert.match(workbenchHtml, />PROCESSES</, 'process monitor is labeled as Processes rather than Terminal');
@@ -316,9 +335,22 @@ try {
   assert.match(changesUi, /Accept connection/);
   assert.match(changesUi, /api\/workbench\/connections/);
   assert.match(changesUi, /currentWorkspaceOperations/);
-  assert.match(changesUi, /latest-change-set/);
-  assert.match(changesUi, /Show \$\{count - 3\} more files/);
-  assert.match(changesUi, /api\/workbench\/change-sets/);
+  assert.match(changesUi, /review-runs\/latest/);
+  assert.doesNotMatch(changesUi, /Show \$\{count - 3\} more files/, 'workspace review no longer silently hides files after the first three');
+  assert.doesNotMatch(changesUi, /recentFiles\.slice\(0,\s*6\)/, 'Review Center renders every file in the latest review run');
+  assert.match(changesUi, /permissionSummary/, 'approval UI surfaces permission risk and effects');
+  assert.match(workbenchHtml, /id="review-decision-status"[^>]*aria-live="polite"/, 'approval dialog has an accessible live decision status');
+  assert.match(changesUi, /Approval received · starting operation…/, 'Approve gives immediate visible feedback before the command finishes');
+  assert.match(changesUi, /approve\.disabled = busy/, 'Approve is disabled while a decision is in flight to prevent double execution');
+  assert.match(changesUi, /pendingOperation\.status = approve \? 'running' : 'denied'/, 'pending approval cards update optimistically as soon as the user decides');
+  assert.match(changesUi, /Approval was not applied\. You can try again\./, 'failed approval submission restores an actionable retry state');
+  assert.match(changesUi, /Approved · operation completed\./, 'successful approval remains visibly acknowledged in the review dialog');
+  assert.match(changesUi, /Approval expired before execution\. Request a new operation\./, 'stale approvals surface the actual expired state instead of a generic pending error');
+  assert.match(changesUi, /latest && latest\.status !== 'pending'\) return/, 'terminal stale decisions are reconciled without rethrowing a misleading UI error');
+  assert.match(workbenchCss, /\.review-decision-status\.busy/, 'approval running state has distinct visual treatment');
+  assert.match(workbenchCss, /#review-actions button:disabled/, 'approval action buttons expose a disabled busy state');
+  assert.match(changesUi, /latest review run/, 'Review Center uses persisted review-run terminology');
+  assert.match(changesUi, /api\/workbench\/review-runs/);
   assert.match(changesUi, /Undoing…/, 'workspace review exposes an Undo busy state');
   assert.match(changesUi, /invalidateRestoredEditorTabs/, 'workspace Undo invalidates stale editor tabs after restoring files');
   assert.match(changesUi, /await loadChanges\(\)/, 'workspace Undo refreshes source control immediately after restore');
@@ -442,6 +474,7 @@ try {
   assert.equal(initialEvent.event, 'change');
   assert.deepEqual(initialEvent.data.scopes, ['state']);
   assert.equal(initialEvent.data.reason, 'initial');
+  assert.equal(Number(initialEvent.id), initialEvent.data.revision, 'SSE event id tracks the monotonic workbench revision');
   const typedEventPromise = eventStream.next();
   await policy(task.id, 'ask', true);
   const typedEvent = await typedEventPromise;
@@ -449,38 +482,89 @@ try {
   assert.equal(typedEvent.data.taskId, task.id);
   assert.ok(typedEvent.data.scopes.includes('tasks'));
   assert.ok(typedEvent.data.scopes.includes('operations'));
+  assert.ok(Number(typedEvent.id) > Number(initialEvent.id), 'persisted mutations advance the live revision');
   await eventStream.close();
+  const replayResponse = await fetch(admin + `/api/workbench/events?afterRevision=${initialEvent.id}`, { headers: { Authorization: 'Bearer workbench-test-admin' } });
+  const replayStream = sseEvents(replayResponse);
+  const replayedEvent = await replayStream.next();
+  assert.equal(replayedEvent.id, typedEvent.id, 'SSE reconnect replays missed revisions');
+  assert.equal(replayedEvent.data.taskId, task.id);
+  await replayStream.close();
   const toolList = await rpc('tools/list', {});
   assert.ok(toolList.tools.some(t => t.name === 'github'));
   assert.equal(toolList.tools.find(t => t.name === 'run_command').annotations.openWorldHint, true);
   console.log('OK authentication, origin guard, default policy, honest tool metadata');
 
   await policy(task.id, 'full', false);
-  assert.equal((await call('run_command', { command: 'node -e "process.exit(0)"' })).isError, undefined, 'non-edit mutation starts a fresh change-set boundary');
-  assert.equal((await call('write_file', { path: 'changeset-a.txt', content: 'alpha\n' })).isError, undefined);
-  assert.equal((await call('read_text_file', { path: 'sample.txt' })).isError, undefined, 'read-only tools do not split the active change set');
-  assert.equal((await call('write_file', { path: 'changeset-b.txt', content: 'beta\n' })).isError, undefined);
+  const delegatedReceipt = payload(await call('workbench_control', {
+    action: 'create_task',
+    task_title: 'Delegated child task',
+    workspace_id: task.workspaceId,
+    delegate_as_child: true,
+    environment_mode: 'local',
+  }));
+  assert.equal(delegatedReceipt.task.parent_task_id, task.id, 'orchestrator creates a bounded child task under the current task');
+  assert.equal(delegatedReceipt.assignment, null, 'local delegated child stays local unless explicitly queued');
+  assert.equal(delegatedReceipt.dashboard_selection_unchanged, true, 'delegating a child does not repoint the Workbench dashboard');
+  const delegatedChildId = delegatedReceipt.task.id;
+  const delegatedChildren = payload(await call('workbench', { view: 'children' }));
+  const delegatedChild = delegatedChildren.children.find(child => child.id === delegatedChildId);
+  assert.ok(delegatedChild, 'parent can read delegated child status');
+  assert.equal(delegatedChild.delegation_scope.canReadStatus, true);
+  assert.equal(delegatedChild.delegation_scope.canReadHandoff, true);
+  assert.equal(delegatedChild.delegation_scope.canRequestMerge, false);
+  assert.match(delegatedChildren.boundary, /Raw child operation results and arguments are not exposed/);
+  const delegatedState = await adminRequest('/api/workbench');
+  assert.equal(delegatedState.selectedTaskId, task.id, 'child orchestration is independent from the dashboard-selected parent task');
+  assert.equal(delegatedState.tasks.find(item => item.id === delegatedChildId)?.createdBySessionId, sid);
+  assert.equal(delegatedState.agentAssignments.some(item => item.taskId === delegatedChildId && item.status === 'queued'), false);
+  await adminRequest(`/api/workbench/tasks/${task.id}/select`, {});
+  const reviewTurnMeta = { turn_id: 'workspace-review-regression-turn' };
+  assert.equal((await call('write_file', { path: 'changeset-a.txt', content: 'alpha\n' }, reviewTurnMeta)).isError, undefined);
+  assert.equal((await call('run_command', { command: 'node -e "process.exit(0)"' }, reviewTurnMeta)).isError, undefined, 'commands between edits remain inside the current review run');
+  assert.equal((await call('read_text_file', { path: 'sample.txt' }, reviewTurnMeta)).isError, undefined, 'read-only tools do not split the active change set');
+  assert.equal((await call('write_file', { path: 'changeset-b.txt', content: 'beta\n' }, reviewTurnMeta)).isError, undefined);
   const changeSetState = await adminRequest('/api/workbench');
   const changeSetOps = changeSetState.operations.filter(operation => (operation.changes || []).some(change => /changeset-[ab]\.txt$/i.test(change.path.replace(/\\/g, '/'))));
   assert.equal(changeSetOps.length, 2);
   assert.ok(changeSetOps[0].changeSetId, 'file operations expose a changeSetId');
   assert.equal(changeSetOps[0].changeSetId, changeSetOps[1].changeSetId, 'consecutive edits from one session share a change set');
+  assert.equal(changeSetOps[0].reviewRunId, changeSetOps[1].reviewRunId, 'file operations expose the stable review-run identity');
   const changeSetId = changeSetOps[0].changeSetId;
+  const runMembers = changeSetState.operations.filter(operation => operation.reviewRunId === changeSetId);
+  assert.equal(runMembers.length, 3, 'edit -> command -> edit is one review run');
+  const fullCommand = runMembers.find(operation => operation.tool === 'run_command');
+  assert.ok(fullCommand);
+  assert.equal(fullCommand.permission.decision, 'allow', 'Full uses the same permission engine for commands');
+  assert.equal(fullCommand.permission.risk, 'command');
+  assert.equal(fullCommand.permission.riskLevel, 'medium');
+  assert.equal(fullCommand.permission.reasonCode, 'full_access');
+  assert.ok(fullCommand.permission.effects.includes('process'));
   let latestChangeSet = (await adminRequest(`/api/workbench/workspaces/${task.workspaceId}/latest-change-set`)).changeSet;
   assert.equal(latestChangeSet.id, changeSetId);
   assert.equal(latestChangeSet.review.files.length, 2);
   assert.equal(latestChangeSet.canUndo, true);
   assert.equal(latestChangeSet.review.files.some(file => 'diff' in file), false, 'workspace summary omits full diffs');
   const changeSetDetail = await adminRequest(`/api/workbench/change-sets/${changeSetId}`);
-  assert.equal(changeSetDetail.operationCount, 2);
+  assert.equal(changeSetDetail.operationCount, 3);
   assert.equal(changeSetDetail.review.files.length, 2);
   assert.ok(changeSetDetail.review.files.every(file => typeof file.diff === 'string'), 'change-set review exposes aggregate diffs on demand');
-  await adminRequest(`/api/workbench/change-sets/${changeSetId}/undo`, { redo: false });
+  const latestReviewRun = (await adminRequest(`/api/workbench/workspaces/${task.workspaceId}/review-runs/latest`)).reviewRun;
+  assert.equal(latestReviewRun.id, changeSetId, 'review-run API aliases the compatibility change-set identity');
+  assert.equal(latestReviewRun.reviewRunStatus, 'open', 'active review run exposes its persisted lifecycle state');
+  assert.ok(['host', 'fallback', 'explicit', 'local'].includes(latestReviewRun.identitySource));
+  assert.ok(latestReviewRun.startedAt);
+  const reviewRuns = (await adminRequest(`/api/workbench/workspaces/${task.workspaceId}/review-runs`)).reviewRuns;
+  assert.equal(reviewRuns[0].id, changeSetId, 'review-run list returns the latest persisted review boundary first');
+  const reviewRunDetail = await adminRequest(`/api/workbench/review-runs/${changeSetId}`);
+  assert.equal(reviewRunDetail.operationCount, 3);
+  assert.equal(reviewRunDetail.review.files.length, 2);
+  await adminRequest(`/api/workbench/review-runs/${changeSetId}/undo`, { redo: false });
   await assert.rejects(fs.stat(path.join(workspace, 'changeset-a.txt')));
   await assert.rejects(fs.stat(path.join(workspace, 'changeset-b.txt')));
   latestChangeSet = (await adminRequest(`/api/workbench/workspaces/${task.workspaceId}/latest-change-set`)).changeSet;
   assert.equal(latestChangeSet.canRedo, true);
-  await adminRequest(`/api/workbench/change-sets/${changeSetId}/undo`, { redo: true });
+  await adminRequest(`/api/workbench/review-runs/${changeSetId}/undo`, { redo: true });
   assert.equal(await fs.readFile(path.join(workspace, 'changeset-a.txt'), 'utf8'), 'alpha\n');
   assert.equal(await fs.readFile(path.join(workspace, 'changeset-b.txt'), 'utf8'), 'beta\n');
   await fs.writeFile(path.join(workspace, 'changeset-b.txt'), 'human edit\n');
@@ -491,8 +575,28 @@ try {
   await adminRequest(`/api/workbench/change-sets/${changeSetId}/undo`, { redo: false });
   await assert.rejects(fs.stat(path.join(workspace, 'changeset-a.txt')));
   await assert.rejects(fs.stat(path.join(workspace, 'changeset-b.txt')));
+
+  const headerTurn = { 'x-openai-turn-id': 'workspace-review-header-turn' };
+  assert.equal((await callWithHeaders('write_file', { path: 'header-turn-a.txt', content: 'header-a\n' }, headerTurn)).isError, undefined);
+  assert.equal((await callWithHeaders('write_file', { path: 'header-turn-b.txt', content: 'header-b\n' }, headerTurn)).isError, undefined);
+  const headerTurnState = await adminRequest('/api/workbench');
+  const headerTurnOps = headerTurnState.operations.filter(operation => (operation.changes || []).some(change => /header-turn-[ab]\.txt$/i.test(change.path.replace(/\\/g, '/'))));
+  assert.equal(headerTurnOps.length, 2);
+  assert.equal(headerTurnOps[0].reviewRunId, headerTurnOps[1].reviewRunId, 'stable host turn header groups mutations into one ReviewRun');
+  assert.notEqual(headerTurnOps[0].reviewRunId, changeSetId, 'a new host turn header creates a new ReviewRun');
+  await adminRequest(`/api/workbench/review-runs/${headerTurnOps[0].reviewRunId}/undo`, { redo: false });
+  await assert.rejects(fs.stat(path.join(workspace, 'header-turn-a.txt')));
+  await assert.rejects(fs.stat(path.join(workspace, 'header-turn-b.txt')));
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal((await call('write_file', { path: 'fallback-turn-a.txt', content: 'fallback-a\n' })).isError, undefined);
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal((await call('write_file', { path: 'fallback-turn-b.txt', content: 'fallback-b\n' })).isError, undefined);
+  const fallbackTurnState = await adminRequest('/api/workbench');
+  const fallbackTurnOps = fallbackTurnState.operations.filter(operation => (operation.changes || []).some(change => /fallback-turn-[ab]\.txt$/i.test(change.path.replace(/\\/g, '/'))));
+  assert.equal(fallbackTurnOps.length, 2);
+  assert.notEqual(fallbackTurnOps[0].reviewRunId, fallbackTurnOps[1].reviewRunId, 'quiescent fallback lifecycle separates later user turns when the host supplies no turn id');
   await policy(task.id, 'ask', true);
-  console.log('OK workspace change sets aggregate edits and support conflict-safe batch Undo/Redo');
+  console.log('OK workspace review runs aggregate edits across commands and support conflict-safe batch Undo/Redo');
 
   const originalSid = sid;
   const secondWorkspace = path.join(tmp, 'second-project');
@@ -509,6 +613,11 @@ try {
   workspaceState = await adminRequest('/api/workbench');
   assert.equal(workspaceState.selectedWorkspaceId, secondWorkspaceRecord.id);
   assert.equal(workspaceState.selectedTaskId, undefined, 'selecting an empty workspace does not invent a dashboard task');
+  assert.match(
+    JSON.stringify(await adminRequest(`/api/workbench/tasks/${task.id}/assignment`, {}, 'POST', 400)),
+    /AGENT_ASSIGNMENT_ISOLATION_REQUIRED/,
+    'a second ChatGPT session cannot be queued onto the shared local checkout',
+  );
 
   const cloneSource = path.join(tmp, 'clone-source');
   await fs.mkdir(cloneSource);
@@ -874,9 +983,19 @@ try {
 
   const request = payload(await call('write_file', { path: 'sample.txt', content: 'after\n' }));
   assert.equal(request.status, 'approval_required');
+  assert.equal(request.risk, 'edit');
+  assert.equal(request.risk_level, 'low');
+  assert.equal(request.reason_code, 'approval_required');
+  assert.ok(request.effects.includes('files'));
+  assert.match(request.reason, /Ask requires approval/);
   assert.equal(await fs.readFile(path.join(workspace, 'sample.txt'), 'utf8'), 'before\n');
   const pendingReview = await adminRequest(`/api/workbench/operations/${request.operation_id}`);
   assert.equal(pendingReview.sessionId, sid, 'MCP operation is attributed to the originating session');
+  assert.equal(pendingReview.permission.decision, 'prompt');
+  assert.equal(pendingReview.permission.risk, 'edit');
+  assert.equal(pendingReview.permission.riskLevel, 'low');
+  assert.equal(pendingReview.permission.reasonCode, 'approval_required');
+  assert.ok(pendingReview.permission.effects.includes('files'));
   const sessionToolActivity = await adminRequest(`/api/activity?limit=100&kind=tool&q=${encodeURIComponent(sid)}`);
   assert.ok(sessionToolActivity.entries.some(entry => entry.session_id === sid), 'tool activity can be filtered by originating session');
   assert.ok(sessionToolActivity.entries.every(entry => entry.kind === 'tool'));
@@ -890,7 +1009,9 @@ try {
   assert.equal('diff' in summarizedPending.review.files[0], false, 'list payload must not include full pending diff');
   await approve(request.operation_id);
   assert.equal(await fs.readFile(path.join(workspace, 'sample.txt'), 'utf8'), 'after\n');
-  await approve(request.operation_id, 400);
+  const repeatedApproval = await approve(request.operation_id);
+  assert.equal(repeatedApproval.status, 'completed', 'repeating an already-applied approval is idempotent');
+  assert.match(JSON.stringify(await adminRequest(`/api/workbench/operations/${request.operation_id}/decision`, { approve: false }, 'POST', 409)), /APPROVAL_DECISION_CONFLICT/);
   let op = await adminRequest(`/api/workbench/operations/${request.operation_id}`);
   assert.equal(op.changes.length, 1);
   assert.equal(op.review.files.length, 1, 'completed file operation keeps a reviewable actual diff');
@@ -922,11 +1043,21 @@ try {
   assert.equal(patchPreview.review.files.every(file => file.operation === 'create'), true);
   assert.equal(patchPreview.review.additions, 2);
   await adminRequest(`/api/workbench/operations/${patchPreviewRequest.operation_id}/decision`, { approve: false });
+  const repeatedDenial = await adminRequest(`/api/workbench/operations/${patchPreviewRequest.operation_id}/decision`, { approve: false });
+  assert.equal(repeatedDenial.status, 'denied', 'repeating a denial is idempotent');
+  assert.match(JSON.stringify(await adminRequest(`/api/workbench/operations/${patchPreviewRequest.operation_id}/decision`, { approve: true }, 'POST', 409)), /APPROVAL_DECISION_CONFLICT/);
   await assert.rejects(fs.stat(path.join(workspace, 'preview-a.txt')));
   const cleanCheckpoint = await adminRequest(`/api/workbench/tasks/${task.id}/checkpoints`, { title: 'Before task batch' });
   await policy(task.id, 'auto', true);
   assert.equal((await call('write_file', { path: 'sample.txt', content: 'checkpoint change\n' })).isError, undefined);
   assert.equal((await call('write_file', { path: 'checkpoint-new.txt', content: 'new from checkpoint\n' })).isError, undefined);
+  const autoPermissionState = await adminRequest('/api/workbench');
+  const autoWrite = autoPermissionState.operations.find(operation => operation.taskId === task.id && operation.tool === 'write_file'
+    && (operation.changes || []).some(change => /checkpoint-new\.txt$/i.test(change.path.replace(/\\/g, '/'))));
+  assert.equal(autoWrite.permission.decision, 'allow', 'Auto routes routine workspace edits through the same permission engine without prompting');
+  assert.equal(autoWrite.permission.risk, 'edit');
+  assert.equal(autoWrite.permission.riskLevel, 'low');
+  assert.equal(autoWrite.permission.reasonCode, 'auto_safe_edit');
   const cleanPlan = await adminRequest(`/api/workbench/checkpoints/${cleanCheckpoint.id}/preview`);
   assert.equal(cleanPlan.operationCount, 2);
   assert.equal(cleanPlan.files.length, 2);
@@ -954,7 +1085,8 @@ try {
   assert.match(JSON.stringify(await approve(stale.operation_id, 400)), /APPROVAL_CONFLICT/);
   assert.equal(await fs.readFile(path.join(workspace, 'sample.txt'), 'utf8'), 'new human edit');
   const revoked = payload(await call('write_file', { path: 'sample.txt', content: 'revoked' }));
-  await policy(task.id, 'auto', true); await approve(revoked.operation_id, 400);
+  await policy(task.id, 'auto', true);
+  assert.match(JSON.stringify(await approve(revoked.operation_id, 410)), /APPROVAL_GONE/, 'policy changes invalidate pending approvals with an explicit terminal response');
   assert.equal((await call('write_file', { path: 'sample.txt', content: 'auto edit' })).isError, undefined);
   console.log('OK stale approval and policy changes invalidate pending requests');
 
@@ -990,13 +1122,16 @@ try {
   assert.equal((await call('git_push', {})).isError, true);
   console.log('OK local commit excludes unrelated files; option injection and implicit push rejected');
 
-  const isolatedTask = await adminRequest('/api/workbench/tasks', {
-    title: 'Isolated worktree task',
-    workspaceId: task.workspaceId,
-    environment: { mode: 'worktree', startingRef: 'HEAD' },
-    kind: 'parallel',
-    assignNextChatgpt: true,
-  });
+  const isolatedReceipt = payload(await call('workbench_control', {
+    action: 'create_task',
+    task_title: 'Isolated worktree task',
+    workspace_id: task.workspaceId,
+    delegate_as_child: true,
+    assign_next_chatgpt: true,
+  }));
+  const isolatedTask = (await adminRequest('/api/workbench')).tasks.find(item => item.id === isolatedReceipt.task.id);
+  assert.ok(isolatedTask, 'delegated queued child is persisted');
+  assert.equal(isolatedTask.parentTaskId, task.id, 'queued child remains linked to its orchestrator parent');
   assert.equal(isolatedTask.execution.mode, 'worktree');
   assert.equal(isolatedTask.kind, 'parallel');
   assert.equal(isolatedTask.lifecycle, 'open');
@@ -1014,16 +1149,25 @@ try {
   assert.ok(isolatedOverview.worktrees.some(item => path.resolve(item.path) === path.resolve(isolatedTask.execution.path) && item.branch === isolatedTask.execution.branch && !item.detached));
 
   let coordinatorState = await adminRequest('/api/workbench');
-  assert.ok(coordinatorState.agentAssignments.some(item => item.taskId === isolatedTask.id), 'parallel task can reserve the next ChatGPT session');
+  const isolatedReservation = coordinatorState.agentAssignments.find(item => item.taskId === isolatedTask.id);
+  assert.ok(isolatedReservation, 'parallel task can reserve the next ChatGPT session');
+  assert.equal(isolatedReservation.status, 'queued');
+  assert.equal(isolatedReservation.clientType, 'chatgpt');
   const sidBeforeAssignment = sid;
+  await adminRequest(`/api/workbench/workspaces/${secondWorkspaceRecord.id}/select`, {});
   sid = undefined;
   await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ChatGPT assignment test', version: '1' } });
   const assignmentSid = sid;
   assert.ok(assignmentSid);
-  assert.equal(payload(await call('workbench')).task.id, isolatedTask.id, 'queued task is claimed instead of the currently selected task');
+  assert.equal(payload(await call('workbench')).task.id, isolatedTask.id, 'unique queued task is claimed even while another workspace is open in the dashboard');
   coordinatorState = await adminRequest('/api/workbench');
-  assert.ok(!coordinatorState.agentAssignments.some(item => item.taskId === isolatedTask.id), 'claimed assignment leaves the queue');
+  assert.ok(!coordinatorState.agentAssignments.some(item => item.taskId === isolatedTask.id), 'claimed assignment leaves the public queue');
   assert.ok(coordinatorState.agentBindings.some(item => item.sessionId === assignmentSid && item.taskId === isolatedTask.id && item.clientType === 'chatgpt'));
+  const persistedAfterClaim = JSON.parse(await fs.readFile(path.join(env.WORKBENCH_PATH, 'state.json'), 'utf8'));
+  const claimedReservation = persistedAfterClaim.agentAssignments.find(item => item.id === isolatedReservation.id);
+  assert.equal(claimedReservation?.status, 'claimed', 'claimed lease is retained in bounded assignment history');
+  assert.equal(claimedReservation?.claimedBySessionId, assignmentSid, 'claimed lease records the owning session');
+  assert.ok(claimedReservation?.claimedAt, 'claimed lease records claim time');
 
   const conflictTask = await adminRequest('/api/workbench/tasks', {
     title: 'Frontend conflict task',
@@ -1032,12 +1176,45 @@ try {
     kind: 'parallel',
     assignNextChatgpt: true,
   });
+  const backendTask = await adminRequest('/api/workbench/tasks', {
+    title: 'Backend queued task',
+    workspaceId: task.workspaceId,
+    environment: { mode: 'worktree', startingRef: 'HEAD' },
+    kind: 'parallel',
+    assignNextChatgpt: true,
+  });
+  const otherWorkspaceTask = await adminRequest('/api/workbench/tasks', {
+    title: 'Other workspace queued task',
+    workspaceId: secondWorkspaceRecord.id,
+    environment: { mode: 'worktree', startingRef: 'HEAD' },
+    kind: 'parallel',
+    assignNextChatgpt: true,
+  });
+  assert.equal((await adminRequest('/api/workbench')).agentAssignments.filter(item =>
+    [conflictTask.id, backendTask.id].includes(item.taskId)).length, 2,
+  'two independent worktree assignments can wait in the same workspace');
+  await adminRequest(`/api/workbench/workspaces/${secondWorkspaceRecord.id}/select`, {});
+  sid = undefined;
+  await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ChatGPT other workspace agent', version: '1' } });
+  const otherWorkspaceSid = sid;
+  assert.equal(payload(await call('workbench')).task.id, otherWorkspaceTask.id,
+    'multiple queued leases cannot steal an assignment from another selected workspace');
+  assert.equal((await adminRequest('/api/workbench')).agentAssignments.filter(item =>
+    [conflictTask.id, backendTask.id].includes(item.taskId)).length, 2,
+  'claiming another workspace leaves both queued agents untouched');
   await adminRequest(`/api/workbench/tasks/${isolatedTask.id}/select`, {});
   sid = undefined;
   await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ChatGPT second parallel agent', version: '1' } });
   const conflictSid = sid;
   assert.ok(conflictSid && conflictSid !== assignmentSid);
-  assert.equal(payload(await call('workbench')).task.id, conflictTask.id, 'queued Task B is claimed even while the Workbench UI is viewing Task A');
+  assert.equal(payload(await call('workbench')).task.id, conflictTask.id, 'oldest lease in the selected workspace is claimed even when Task A is open');
+  sid = undefined;
+  await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ChatGPT third parallel agent', version: '1' } });
+  const backendSid = sid;
+  assert.ok(backendSid && backendSid !== conflictSid && backendSid !== assignmentSid);
+  assert.equal(payload(await call('workbench')).task.id, backendTask.id, 'second queued lease is claimed by a different session without changing dashboard selection');
+  assert.equal((await adminRequest('/api/workbench')).agentAssignments.some(item =>
+    [conflictTask.id, backendTask.id].includes(item.taskId)), false, 'both leases are consumed exactly once');
 
   await adminRequest(`/api/workbench/tasks/${conflictTask.id}/select`, {});
   sid = assignmentSid;
@@ -1048,28 +1225,33 @@ try {
 
   await policy(isolatedTask.id, 'full', false);
   await policy(conflictTask.id, 'full', false);
+  await policy(backendTask.id, 'full', false);
   const sessionTimedCommand = (file, waitMs) => `node -e "const fs=require('fs');const f='${file}';const v={start:Date.now()};fs.writeFileSync(f,JSON.stringify(v));setTimeout(()=>{v.end=Date.now();fs.writeFileSync(f,JSON.stringify(v));},${waitMs})"`;
   await Promise.all([
     callWithSession(assignmentSid, 'run_command', { command: sessionTimedCommand('agent-session-a.json', 500) }),
     callWithSession(conflictSid, 'run_command', { command: sessionTimedCommand('agent-session-b.json', 500) }),
+    callWithSession(backendSid, 'run_command', { command: sessionTimedCommand('agent-session-c.json', 500) }),
   ]);
   const sessionA = JSON.parse(await fs.readFile(path.join(isolatedTask.execution.path, 'agent-session-a.json'), 'utf8'));
   const sessionB = JSON.parse(await fs.readFile(path.join(conflictTask.execution.path, 'agent-session-b.json'), 'utf8'));
-  assert.ok(sessionA.start < sessionB.end && sessionB.start < sessionA.end, 'two ChatGPT sessions execute concurrently on separate task worktrees');
+  const sessionC = JSON.parse(await fs.readFile(path.join(backendTask.execution.path, 'agent-session-c.json'), 'utf8'));
+  assert.ok([sessionA, sessionB, sessionC].every((current, index, all) => all.every((other, otherIndex) =>
+    index === otherIndex || (current.start < other.end && other.start < current.end))),
+  'three ChatGPT sessions execute concurrently on separate task worktrees');
 
   await fs.writeFile(path.join(isolatedTask.execution.path, 'sample.txt'), 'agent-a conflict\n');
   await fs.writeFile(path.join(conflictTask.execution.path, 'sample.txt'), 'agent-b conflict\n');
-  const agentCoordinator = await adminRequest('/api/workbench/agents');
-  const isolatedAgent = agentCoordinator.agents.find(agent => agent.sessionId === assignmentSid);
-  const conflictAgent = agentCoordinator.agents.find(agent => agent.sessionId === conflictSid);
+  const parallelAgentCoordinator = await adminRequest('/api/workbench/agents');
+  const isolatedAgent = parallelAgentCoordinator.agents.find(agent => agent.sessionId === assignmentSid);
+  const conflictAgent = parallelAgentCoordinator.agents.find(agent => agent.sessionId === conflictSid);
   assert.equal(isolatedAgent?.taskTitle, 'Isolated worktree task');
   assert.ok(isolatedAgent?.changedPaths.includes('sample.txt'), 'active parallel agent reports its changed paths');
   assert.equal(conflictAgent?.taskTitle, 'Frontend conflict task');
   assert.ok(conflictAgent?.changedPaths.includes('sample.txt'), 'second active parallel agent reports its changed paths');
   assert.ok(isolatedAgent?.conflicts.some(conflict => conflict.type === 'path_overlap' && conflict.withTaskId === conflictTask.id && conflict.paths?.includes('sample.txt')));
   assert.ok(conflictAgent?.conflicts.some(conflict => conflict.type === 'path_overlap' && conflict.withTaskId === isolatedTask.id && conflict.paths?.includes('sample.txt')));
-  assert.ok(agentCoordinator.summary.conflicts >= 2, 'conflict summary counts affected agent rows');
-  console.log('OK Session Routing V2 keeps two ChatGPT tasks pinned and concurrent regardless of Workbench selection');
+  assert.ok(parallelAgentCoordinator.summary.conflicts >= 2, 'conflict summary counts affected agent rows');
+  console.log('OK Session Routing V2 claims multiple queued tasks and runs three ChatGPT agents concurrently regardless of Workbench selection');
   console.log('OK aggregate agent coordinator reports active work, changed paths and cross-task conflicts');
 
   const integrationWorkspacePath = path.join(tmp, 'integration-project');
@@ -1271,7 +1453,7 @@ try {
   assert.equal(discardedRuntime.running, 0, 'discard stops task-owned background processes before deleting the worktree');
   const interruptedDiscardOperation = await adminRequest(`/api/workbench/operations/${discardPending.operation_id}`);
   assert.equal(interruptedDiscardOperation.status, 'interrupted', 'discard invalidates pending approvals tied to the deleted worktree');
-  assert.match(JSON.stringify(await adminRequest(`/api/workbench/operations/${discardPending.operation_id}/decision`, { approve: true }, 'POST', 400)), /no longer pending/i);
+  assert.match(JSON.stringify(await adminRequest(`/api/workbench/operations/${discardPending.operation_id}/decision`, { approve: true }, 'POST', 410)), /APPROVAL_GONE/);
   const discardedWorkbenchState = await adminRequest('/api/workbench');
   assert.equal(discardedWorkbenchState.tasks.find(item => item.id === discardTask.id)?.lifecycle, 'archived');
   assert.ok(discardedWorkbenchState.tasks.find(item => item.id === discardTask.id)?.integration?.discardedAt);
@@ -1337,7 +1519,15 @@ try {
   const beforePreviewRestart = await adminRequest('/api/workbench');
   assert.ok(beforePreviewRestart.portLeases.some(lease => lease.taskId === secondTask.id && lease.port === restartPreview.port));
   await adminRequest(`/api/workbench/tasks/${secondTask.id}/select`, {});
-  await stop(); sid = undefined; await start();
+  await stop();
+  const legacyStatePath = path.join(env.WORKBENCH_PATH, 'state.json');
+  const legacyState = JSON.parse(await fs.readFile(legacyStatePath, 'utf8'));
+  const legacyPermissionOperation = legacyState.operations.find(operation => operation.id === request.operation_id);
+  assert.ok(legacyPermissionOperation?.permission, 'restart fixture has a persisted permission decision to migrate');
+  delete legacyPermissionOperation.permission.riskLevel;
+  delete legacyPermissionOperation.permission.reasonCode;
+  await fs.writeFile(legacyStatePath, JSON.stringify(legacyState, null, 2));
+  sid = undefined; await start();
   sid = preRestartSid;
   assert.equal(payload(await call('workbench')).task.id, task.id, 'Recovered session retains its original task across restart');
   const afterPreviewRestart = await adminRequest('/api/workbench');
@@ -1351,6 +1541,8 @@ try {
   await assert.rejects(fs.stat(path.join(workspace, 'restart.txt')));
   op = await adminRequest(`/api/workbench/operations/${request.operation_id}`);
   assert.equal(op.changes.length, 1);
+  assert.equal(op.permission.riskLevel, 'low', 'restart migrates legacy persisted permission risk metadata');
+  assert.ok(op.permission.reasonCode, 'restart migrates legacy persisted permission reason codes');
   assert.notEqual(await oauthAccessStatus(freshTokens.access_token), 401);
   const revoke = await fetch(base + '/revoke', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: client.client_id, token: freshTokens.refresh_token }) });
   assert.equal(revoke.status, 200);

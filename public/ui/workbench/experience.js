@@ -29,8 +29,8 @@ export function renderExperience() {
   $('history-operations-label').textContent = basic ? 'RECENT WORK' : 'OPERATIONS';
   $('review-center-heading').textContent = basic ? 'Review changes' : 'Review Center';
   $('review-center-kicker').textContent = basic ? 'PROJECT' : 'WORKSPACE REVIEW';
-  $('policy-auto-label').textContent = basic ? 'Allow safe edits' : 'Auto';
-  $('policy-full-label').textContent = 'No approval prompts';
+  $('policy-auto-label').textContent = 'Approve for me';
+  $('policy-full-label').textContent = 'Full access';
   $('approve-operation').textContent = basic ? 'Allow once' : 'Approve once';
   if (basic) state.agentFilter = 'all';
 

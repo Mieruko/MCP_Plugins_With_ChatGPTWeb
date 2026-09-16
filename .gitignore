@@ -9,6 +9,7 @@ profiles/*
 !profiles/post-edit-hooks.json
 !profiles/chatgpt-connector-description.txt
 .mcp-state/
+.workbench-state/
 .env
 terminals/
 agent-tools/

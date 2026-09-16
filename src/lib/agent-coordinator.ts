@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 export type AgentClientType = "chatgpt" | "mcp";
+export type AgentAssignmentClientType = AgentClientType | "worker";
+export type AgentAssignmentStatus = "queued" | "claimed" | "expired" | "cancelled";
 
 export interface AgentBinding {
   id: string;
@@ -16,7 +18,14 @@ export interface AgentBinding {
 export interface AgentAssignment {
   id: string;
   taskId: string;
+  workspaceId: string;
+  clientType: AgentAssignmentClientType;
   createdAt: string;
+  expiresAt: string;
+  leaseNonce: string;
+  status: AgentAssignmentStatus;
+  claimedAt?: string;
+  claimedBySessionId?: string;
 }
 
 export interface AgentCoordinatorState {
@@ -37,18 +46,65 @@ export function migrateLegacySessionTasks(sessionTasks: Record<string, string> |
   }));
 }
 
-export function queueAgentAssignment(state: AgentCoordinatorState, taskId: string, createdAt = new Date().toISOString()): AgentAssignment {
-  const existing = state.agentAssignments.find(item => item.taskId === taskId);
+const DEFAULT_ASSIGNMENT_LEASE_MS = 15 * 60_000;
+
+export function pruneExpiredAgentAssignments(state: AgentCoordinatorState, now = Date.now()): number {
+  let expired = 0;
+  for (const item of state.agentAssignments) {
+    if (item.status !== "queued") continue;
+    const expires = Date.parse(item.expiresAt);
+    if (Number.isFinite(expires) && expires > now) continue;
+    item.status = "expired";
+    expired++;
+  }
+  trimAssignmentHistory(state);
+  return expired;
+}
+
+function trimAssignmentHistory(state: AgentCoordinatorState): void {
+  const queued = state.agentAssignments.filter(item => item.status === "queued");
+  const terminal = state.agentAssignments.filter(item => item.status !== "queued")
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .slice(0, 200);
+  state.agentAssignments = [...queued, ...terminal];
+}
+
+export function queueAgentAssignment(
+  state: AgentCoordinatorState,
+  taskId: string,
+  workspaceId: string,
+  createdAt = new Date().toISOString(),
+  leaseMs = DEFAULT_ASSIGNMENT_LEASE_MS,
+  clientType: AgentAssignmentClientType = "chatgpt",
+): AgentAssignment {
+  pruneExpiredAgentAssignments(state, Date.parse(createdAt));
+  const existing = state.agentAssignments.find(item => item.status === "queued" && item.taskId === taskId && item.workspaceId === workspaceId && item.clientType === clientType);
   if (existing) return existing;
-  const assignment: AgentAssignment = { id: randomUUID(), taskId, createdAt };
+  const assignment: AgentAssignment = {
+    id: randomUUID(),
+    taskId,
+    workspaceId,
+    clientType,
+    createdAt,
+    expiresAt: new Date(Date.parse(createdAt) + Math.max(30_000, leaseMs)).toISOString(),
+    leaseNonce: randomUUID(),
+    status: "queued",
+  };
   state.agentAssignments.push(assignment);
   return assignment;
 }
 
 export function cancelAgentAssignment(state: AgentCoordinatorState, taskId: string): boolean {
-  const before = state.agentAssignments.length;
-  state.agentAssignments = state.agentAssignments.filter(item => item.taskId !== taskId);
-  return state.agentAssignments.length !== before;
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const item of state.agentAssignments) {
+    if (item.taskId !== taskId || item.status !== "queued") continue;
+    item.status = "cancelled";
+    item.expiresAt = now;
+    changed = true;
+  }
+  trimAssignmentHistory(state);
+  return changed;
 }
 
 export function claimSessionTask(
@@ -57,6 +113,7 @@ export function claimSessionTask(
     sessionId: string;
     clientType: AgentClientType;
     fallbackTaskId?: string;
+    workspaceId?: string;
     taskExists: (taskId: string) => boolean;
     now?: string;
   },
@@ -74,11 +131,21 @@ export function claimSessionTask(
   let taskId = input.fallbackTaskId;
   let claimedAssignmentId: string | undefined;
   if (input.clientType === "chatgpt") {
-    const assignment = state.agentAssignments.find(item => input.taskExists(item.taskId));
+    pruneExpiredAgentAssignments(state, Date.parse(now));
+    const assignments = state.agentAssignments
+      .filter(item => item.status === "queued" && item.clientType === "chatgpt" && input.taskExists(item.taskId) && (!input.workspaceId || item.workspaceId === input.workspaceId))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    if (!input.workspaceId && assignments.length > 1) {
+      throw new Error("AGENT_ASSIGNMENT_AMBIGUOUS: multiple ChatGPT task leases are waiting; bind the session to a specific lease before initialization");
+    }
+    const assignment = assignments[0];
     if (assignment) {
       taskId = assignment.taskId;
       claimedAssignmentId = assignment.id;
-      state.agentAssignments = state.agentAssignments.filter(item => item.id !== assignment.id);
+      assignment.status = "claimed";
+      assignment.claimedAt = now;
+      assignment.claimedBySessionId = input.sessionId;
+      trimAssignmentHistory(state);
     }
   }
 

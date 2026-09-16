@@ -5,6 +5,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { evaluatePermission } from '../dist/lib/workbench.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'local-control-permissions-test-'));
@@ -94,6 +95,45 @@ const take = (id, sessionId, expectedSessionId, expected = 200) => request(`/api
 const decide = (id, approve = true, expected = 200) => request('/api/workbench/operations/' + id + '/decision', { approve }, 'POST', expected);
 const handoff = async id => payload(ok(await call(id, 'task_handoff'))).handoff;
 
+const askWrite = evaluatePermission({ mode: 'ask', workspaceOnly: true, revision: 1 }, 'write_file', { path: 'a.txt', content: 'x' }, { workspaceOnly: true });
+assert.equal(askWrite.decision, 'prompt');
+assert.equal(askWrite.riskLevel, 'low');
+assert.deepEqual(askWrite.effects, ['files']);
+const autoWrite = evaluatePermission({ mode: 'auto', workspaceOnly: true, revision: 1 }, 'write_file', { path: 'a.txt', content: 'x' }, { workspaceOnly: true });
+assert.equal(autoWrite.decision, 'allow');
+assert.equal(autoWrite.reasonCode, 'auto_safe_edit');
+const autoCommand = evaluatePermission({ mode: 'auto', workspaceOnly: true, revision: 1 }, 'run_command', { command: 'node -v' }, { workspaceOnly: true });
+assert.equal(autoCommand.decision, 'prompt');
+assert.equal(autoCommand.riskLevel, 'medium');
+assert.ok(autoCommand.effects.includes('process'));
+const fullCommand = evaluatePermission({ mode: 'full', workspaceOnly: false, revision: 1 }, 'run_command', { command: 'node -v' }, { workspaceOnly: false });
+assert.equal(fullCommand.decision, 'allow');
+assert.equal(fullCommand.reasonCode, 'full_access');
+const unknownScoped = evaluatePermission({ mode: 'auto', workspaceOnly: true, revision: 1 }, 'unknown_future_tool', {}, { workspaceOnly: true });
+assert.equal(unknownScoped.decision, 'block');
+assert.equal(unknownScoped.riskLevel, 'high');
+const mergeDecision = evaluatePermission({ mode: 'full', workspaceOnly: false, revision: 1 }, 'github', { action: 'pr_merge' }, { workspaceOnly: false });
+assert.equal(mergeDecision.risk, 'control');
+assert.equal(mergeDecision.riskLevel, 'high');
+assert.ok(mergeDecision.effects.includes('network'));
+const refreshDecision = evaluatePermission({ mode: 'auto', workspaceOnly: false, revision: 1 }, 'mcp_servers', { refresh: true }, { workspaceOnly: false });
+assert.equal(refreshDecision.decision, 'prompt');
+assert.ok(refreshDecision.effects.includes('network'));
+const rewindRestoreDecision = evaluatePermission({ mode: 'ask', workspaceOnly: true, revision: 1 }, 'rewind', { action: 'restore', checkpoint_id: 'fixture' }, { workspaceOnly: true });
+assert.ok(rewindRestoreDecision.effects.includes('files'), 'rewind restore discloses file mutations');
+assert.ok(rewindRestoreDecision.effects.includes('workspace_control'));
+const stopProcessDecision = evaluatePermission({ mode: 'ask', workspaceOnly: true, revision: 1 }, 'stop_process', { id: 'fixture' }, { workspaceOnly: true });
+assert.ok(stopProcessDecision.effects.includes('process'), 'process controls disclose process effects');
+const parallelTaskDecision = evaluatePermission({ mode: 'ask', workspaceOnly: false, revision: 1 }, 'workbench_control', { action: 'create_task', environment_mode: 'parallel' }, { workspaceOnly: false });
+assert.ok(parallelTaskDecision.effects.includes('workspace_control'));
+assert.ok(parallelTaskDecision.effects.includes('task_metadata'));
+assert.ok(parallelTaskDecision.effects.includes('git'));
+assert.ok(parallelTaskDecision.effects.includes('files'));
+const delegatedDefaultDecision = evaluatePermission({ mode: 'ask', workspaceOnly: false, revision: 1 }, 'workbench_control', { action: 'create_task', delegate_as_child: true, assign_next_chatgpt: true }, { workspaceOnly: false });
+assert.ok(delegatedDefaultDecision.effects.includes('git'), 'delegated queued child discloses its implicit managed-worktree Git effect');
+assert.ok(delegatedDefaultDecision.effects.includes('files'));
+console.log('OK centralized permission decision matrix classifies presets, scope and external effects');
+
 try {
   await start();
   const initial = await request('/api/workbench');
@@ -153,7 +193,7 @@ try {
   ok(await setPolicy(session, 'full', false));
   assert.equal((await request('/api/workbench/operations/' + pending.operation_id)).status, 'expired');
   await assert.rejects(fs.stat(path.join(project, 'must-not-run.txt')), { code: 'ENOENT' });
-  await decide(pending.operation_id, true, 400);
+  await decide(pending.operation_id, true, 410);
   console.log('OK switching to Ask restores approval; switching to Full expires pending work without replay');
 
   const job = payload(ok(await call(session, 'start_process', { command: 'node -e "setTimeout(()=>{},30000)"',

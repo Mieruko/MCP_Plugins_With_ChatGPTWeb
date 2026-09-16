@@ -372,6 +372,12 @@ button.environment-stat:disabled { cursor: default; }
 .workspace-review-more { width: 100%; min-height: 34px; padding: 0 12px; border: 0; border-top: 1px solid #24262a; background: #121416; color: #c5c9ce; text-align: left; cursor: pointer; font-size: var(--text-xs); }
 .workspace-review-more:hover { background: #191b1e; color: #f0f1f2; }
 .workspace-review-error { margin: 8px 10px; padding: 8px 9px; border: 1px solid #59343a; border-radius: 6px; background: #1b0f12; color: #ef9da4; font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.review-decision-status { margin: 0 0 10px; padding: 9px 10px; border: 1px solid #354150; border-radius: 7px; background: #0d131a; color: #b8c5d3; font-size: var(--text-xs); line-height: 1.45; }
+.review-decision-status.busy { border-color: #665326; background: #181307; color: #e7bf6f; }
+.review-decision-status.success { border-color: #2c5a3f; background: #0c1711; color: #7fd4a0; }
+.review-decision-status.denied { border-color: #4a4d52; background: #121416; color: #aeb4bb; }
+.review-decision-status.error { border-color: #65373d; background: #1a0e11; color: #ef9da4; }
+#review-actions button:disabled { opacity: .55; cursor: wait; }
 .change-filters { display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--border-soft); overflow-x: auto; }
 .filter-chip { min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: #0d1116; color: var(--muted); cursor: pointer; font-size: var(--text-xs); white-space: nowrap; }
 .filter-chip.active { border-color: #315a8d; background: #101b29; color: #c5dcf6; }

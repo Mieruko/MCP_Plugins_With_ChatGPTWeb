@@ -124,7 +124,7 @@ try {
   assert.match(JSON.stringify(await take(workspace.id, b, null, 400)), /WRITER_CHANGED/);
   await take(workspace.id, b, a);
   assert.equal((await request(`/api/workbench/operations/${pending.operation_id}`)).status, 'interrupted');
-  await request(`/api/workbench/operations/${pending.operation_id}/decision`, { approve: true }, 'POST', 400);
+  await request(`/api/workbench/operations/${pending.operation_id}/decision`, { approve: true }, 'POST', 410);
   denied(await call(a, 'write_file', { path: 'sample.txt', content: 'old writer\n' }), /WRITER_REQUIRED/);
   const pendingB = payload(ok(await call(b, 'write_file', { path: 'sample.txt', content: 'B approved\n' })));
   await request(`/api/workbench/operations/${pendingB.operation_id}/decision`, { approve: true });
@@ -163,7 +163,8 @@ try {
     environment: { mode: 'local' } });
   assert.equal(extraLocal.execution.mode, 'local');
   const completeLocal = await request('/api/workbench/tasks', { title: 'Complete from ChatGPT', workspaceId: workspace.id,
-    environment: { mode: 'local' }, assignNextChatgpt: true });
+    environment: { mode: 'local' } });
+  await request(`/api/workbench/tasks/${completeLocal.id}/select`, {});
   const completionSession = await connect();
   assert.equal(payload(await call(completionSession, 'workbench')).task.id, completeLocal.id);
   const completionResult = payload(ok(await call(completionSession, 'task_complete')));

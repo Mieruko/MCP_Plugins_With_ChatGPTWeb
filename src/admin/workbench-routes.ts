@@ -4,7 +4,7 @@ import { Router } from "express";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpSessionSummary } from "../lib/mcp-session-manager.js";
-import { attachTaskPreviewProcess, cancelAgentTaskAssignment, changeSetDetail, cleanupTaskIntegration, cloneWorkspace, createTask, createTaskCheckpoint, createWorkspace, decideOperation, discardTaskIntegration, dispatch, finishTaskIntegration, getAgentCoordinator, getIntegrationQueue, getWorkbench, latestWorkspaceChangeSet, listTaskCheckpoints, markTaskReadyForMerge, mergeTaskIntegration, operationDetail, prepareTaskPreviewStart, previewTaskCheckpoint, queueAgentTaskAssignment, releaseTaskPreviewPort, relocateWorkspace, removeWorkspace, reopenTaskIntegration, restoreTaskCheckpoint, selectTask, selectWorkspace, setTaskDescription, setTaskHandoff, setTaskIntegrationDependencies, setTaskPolicy, setTaskPreview, subscribeWorkbench, taskExecutionPath, undoChangeSet, undoOperation } from "../lib/workbench.js";
+import { attachTaskPreviewProcess, cancelAgentTaskAssignment, changeSetDetail, cleanupTaskIntegration, cloneWorkspace, createTask, createTaskCheckpoint, createWorkspace, decideOperation, discardTaskIntegration, dispatch, finishTaskIntegration, getAgentCoordinator, getIntegrationQueue, getWorkbench, latestWorkspaceChangeSet, latestWorkspaceReviewRun, listTaskCheckpoints, markTaskReadyForMerge, mergeTaskIntegration, operationDetail, prepareTaskPreviewStart, previewTaskCheckpoint, queueAgentTaskAssignment, releaseTaskPreviewPort, relocateWorkspace, removeWorkspace, reopenTaskIntegration, restoreTaskCheckpoint, reviewRunDetail, selectTask, selectWorkspace, setTaskDescription, setTaskHandoff, setTaskIntegrationDependencies, setTaskPolicy, setTaskPreview, subscribeWorkbench, taskExecutionPath, undoChangeSet, undoOperation, undoReviewRun } from "../lib/workbench.js";
 import { getMachineRoots } from "../lib/path-security.js";
 import { registerFilesystemTools } from "../tools/filesystem.js";
 import { registerShellTools } from "../tools/shell.js";
@@ -13,7 +13,7 @@ import { registerContextTools } from "../tools/context.js";
 import { executeGithub, githubSchema } from "../tools/github.js";
 import { getOAuthProvider } from "../lib/oauth-provider.js";
 import { getTaskRuntime, stopTaskRuntimeProcesses } from "../lib/task-runtime.js";
-import { getWorkspaceExperience, listWorkspaceChangeSets, setWorkspaceExperience, takeWorkspaceWriter } from "../lib/workbench.js";
+import { getWorkspaceExperience, listWorkspaceChangeSets, listWorkspaceReviewRuns, setWorkspaceExperience, takeWorkspaceWriter } from "../lib/workbench.js";
 
 export function createWorkbenchRouter(options: { sessionList?: () => McpSessionSummary[] } = {}): Router {
   const router = Router();
@@ -176,10 +176,18 @@ export function createWorkbenchRouter(options: { sessionList?: () => McpSessionS
   router.get("/api/workbench/checkpoints/:id/preview", route(req => previewTaskCheckpoint(req.params.id)));
   router.post("/api/workbench/checkpoints/:id/restore", route(req => restoreTaskCheckpoint(req.params.id)));
   router.get("/api/workbench/operations/:id", route(req => operationDetail(req.params.id)));
-  router.post("/api/workbench/operations/:id/decision", route(req => {
-    const { approve } = z.object({ approve: z.boolean() }).strict().parse(req.body);
-    return decideOperation(req.params.id, approve);
-  }));
+  router.post("/api/workbench/operations/:id/decision", async (req, res) => {
+    try {
+      const { approve } = z.object({ approve: z.boolean() }).strict().parse(req.body);
+      res.json({ ok: true, data: await decideOperation(req.params.id, approve) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = message.includes("APPROVAL_GONE:") ? 410
+        : message.includes("APPROVAL_DECISION_CONFLICT:") ? 409
+          : message.includes("Unknown operation") ? 404 : 400;
+      res.status(status).json({ ok: false, error: message });
+    }
+  });
   router.post("/api/workbench/operations/:id/undo", route(req => {
     const body = z.object({ redo: z.boolean().default(false), file: z.string().optional() }).strict().parse(req.body);
     return undoOperation(req.params.id, body.redo, body.file);
@@ -189,6 +197,13 @@ export function createWorkbenchRouter(options: { sessionList?: () => McpSessionS
   router.post("/api/workbench/change-sets/:id/undo", route(req => {
     const body = z.object({ redo: z.boolean().default(false) }).strict().parse(req.body || {});
     return undoChangeSet(req.params.id, body.redo);
+  }));
+  router.get("/api/workbench/workspaces/:id/review-runs/latest", route(async req => ({ reviewRun: await latestWorkspaceReviewRun(req.params.id) })));
+  router.get("/api/workbench/workspaces/:id/review-runs", route(async req => ({ reviewRuns: await listWorkspaceReviewRuns(req.params.id) })));
+  router.get("/api/workbench/review-runs/:id", route(req => reviewRunDetail(req.params.id)));
+  router.post("/api/workbench/review-runs/:id/undo", route(req => {
+    const body = z.object({ redo: z.boolean().default(false) }).strict().parse(req.body || {});
+    return undoReviewRun(req.params.id, body.redo);
   }));
   router.get("/api/workbench/tasks/:id/tree", route(async req => {
     const dir = typeof req.query.path === "string" && req.query.path ? req.query.path : ".";
@@ -417,15 +432,31 @@ export function createWorkbenchRouter(options: { sessionList?: () => McpSessionS
     if (!task) throw new Error("Unknown task");
     return dispatch(task.id, "github", input, () => executeGithub(input, taskExecutionPath(task)), true);
   }));
-  router.get("/api/workbench/events", (_req, res) => {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.flushHeaders();
-    const send = (change: unknown) => res.write(`event: change\ndata: ${JSON.stringify(change)}\n\n`);
-    send({ scopes: ["state"], reason: "initial" });
-    const unsubscribe = subscribeWorkbench(change => send(change));
-    const timer = setInterval(() => res.write(": keepalive\n\n"), 15000);
-    res.on("close", () => { unsubscribe(); clearInterval(timer); });
+  router.get("/api/workbench/events", (req, res) => {
+    void (async () => {
+      const snapshot = await getWorkbench();
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+      res.write("retry: 1500\n\n");
+      const headerRevision = Number(req.get("Last-Event-ID") || 0);
+      const queryRevision = Number(typeof req.query.afterRevision === "string" ? req.query.afterRevision : 0);
+      const afterRevision = Number.isFinite(headerRevision) && headerRevision > 0 ? headerRevision : queryRevision;
+      const send = (change: any) => {
+        const revision = Number(change?.revision || snapshot.revision || 0);
+        if (revision > 0) res.write(`id: ${revision}\n`);
+        res.write(`event: change\ndata: ${JSON.stringify(change)}\n\n`);
+      };
+      if (!afterRevision) send({ scopes: ["state"], reason: "initial", revision: snapshot.revision || 0 });
+      const unsubscribe = subscribeWorkbench(change => send(change), afterRevision || snapshot.revision || undefined);
+      const timer = setInterval(() => res.write(": keepalive\n\n"), 15000);
+      res.on("close", () => { unsubscribe(); clearInterval(timer); });
+    })().catch(error => {
+      if (!res.headersSent) res.status(500).json({ ok: false, error: String(error) });
+      else res.end();
+    });
   });
   return router;
 }

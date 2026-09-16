@@ -1,5 +1,6 @@
 import { z } from "zod";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   completeTask,
@@ -14,6 +15,7 @@ import {
   setTaskHandoff,
   targetAgentSession,
   taskExecutionPath,
+  type ReviewIdentity,
 } from "./workbench.js";
 import { executionContext } from "./workbench-context.js";
 import { validatePath } from "./path-security.js";
@@ -21,6 +23,34 @@ import { validatePath } from "./path-security.js";
 const SUMMARY_ATTENTION_LIMIT = 8;
 const HANDOFF_EXCERPT_CHARS = 700;
 const HISTORY_MAX_BYTES = 24_000;
+
+function requestHeader(headers: any, name: string): string | undefined {
+  if (!headers) return undefined;
+  const raw = typeof headers.get === "function"
+    ? headers.get(name)
+    : Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  return typeof first === "string" ? first : undefined;
+}
+
+function reviewIdentity(extra: any): ReviewIdentity | undefined {
+  const meta = extra?._meta;
+  const metaCandidates = meta && typeof meta === "object"
+    ? [meta.turn_id, meta.turnId, meta.run_id, meta.runId, meta["openai/turn_id"], meta["openai/run_id"]]
+    : [];
+  const headers = extra?.requestInfo?.headers;
+  const candidates = [
+    ...metaCandidates,
+    requestHeader(headers, "x-openai-turn-id"),
+    requestHeader(headers, "openai-turn-id"),
+    requestHeader(headers, "x-openai-run-id"),
+    requestHeader(headers, "openai-run-id"),
+    requestHeader(headers, "x-chatgpt-turn-id"),
+  ];
+  const value = candidates.find(item => typeof item === "string" && item.trim().length > 0 && item.trim().length <= 1024)?.trim();
+  if (!value) return undefined;
+  return { turnKeyHash: createHash("sha256").update(value).digest("hex"), source: "host" };
+}
 
 function historySummary(op: Awaited<ReturnType<typeof getWorkbench>>["operations"][number]) {
   return { id: op.id, tool: op.tool.slice(0, 120), status: op.status, createdAt: op.createdAt,
@@ -78,19 +108,19 @@ export function installWorkbench(
   const original = server.registerTool.bind(server) as (...args: any[]) => any;
   server.registerTool = ((name: string, config: any, handler: any) => original(name, config, async (args: any, extra: any) => {
     const immutable = structuredClone(args);
-    return dispatch(await task(), name, immutable, () => handler(structuredClone(immutable), extra), false, pinnedSessionId);
+    return dispatch(await task(), name, immutable, () => handler(structuredClone(immutable), extra), false, pinnedSessionId, undefined, reviewIdentity(extra));
   })) as typeof server.registerTool;
   original("workbench", {
     title: "Task workbench",
-    description: "Read a compact current-task summary, bounded operation history, or one approval result by operation_id. Approvals execute the original operation; never resubmit a pending write. workbench_control reports whether conversational permission changes are enabled.",
+    description: "Read a compact current-task summary, bounded operation history, delegated child status, or one approval result by operation_id. Approvals execute the original operation; never resubmit a pending write. workbench_control reports whether conversational permission changes are enabled.",
     inputSchema: {
       operation_id: z.string().optional(),
-      view: z.enum(["summary", "history"]).default("summary"),
+      view: z.enum(["summary", "history", "children"]).default("summary"),
       limit: z.number().int().min(1).max(30).default(10),
       cursor: z.string().optional(),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, async ({ operation_id, view, limit, cursor }: { operation_id?: string; view: "summary" | "history"; limit: number; cursor?: string }) => {
+  }, async ({ operation_id, view, limit, cursor }: { operation_id?: string; view: "summary" | "history" | "children"; limit: number; cursor?: string }) => {
     const taskId = await task();
     if (operation_id) {
       const op = await operationDetail(operation_id);
@@ -106,6 +136,29 @@ export function installWorkbench(
     const current = data.tasks.find(t => t.id === taskId)!;
     const experience = data.experiences[current.workspaceId];
     const taskOperations = data.operations.filter(o => o.taskId === taskId);
+    if (view === "children") {
+      if (cursor) throw new Error("cursor is only valid with view=history");
+      const children = data.tasks
+        .filter(child => child.parentTaskId === taskId && child.delegationScope?.canReadStatus)
+        .slice(0, limit)
+        .map(child => {
+          const operations = data.operations.filter(operation => operation.taskId === child.id);
+          const statusCounts = Object.fromEntries(["pending", "running", "failed"].map(status => [status,
+            operations.filter(operation => operation.status === status).length]));
+          return {
+            id: child.id,
+            title: child.title,
+            lifecycle: child.lifecycle,
+            kind: child.kind,
+            branch: child.execution.branch || null,
+            operation_counts: statusCounts,
+            handoff: child.delegationScope?.canReadHandoff ? handoffSummary(child.handoff) : { available: false, restricted: true },
+            delegation_scope: child.delegationScope,
+          };
+        });
+      return { content: [{ type: "text", text: JSON.stringify({ view: "children", task_id: taskId, children, truncated: data.tasks.filter(child => child.parentTaskId === taskId && child.delegationScope?.canReadStatus).length > children.length,
+        boundary: "Child status and handoff are bounded delegation views. Raw child operation results and arguments are not exposed." }) }] };
+    }
     if (view === "history") {
       let start = 0;
       if (cursor) {
@@ -175,6 +228,8 @@ export function installWorkbench(
       starting_ref: z.string().max(200).optional(),
       bind_current: z.boolean().optional(),
       create_missing: z.boolean().optional(),
+      assign_next_chatgpt: z.boolean().optional(),
+      delegate_as_child: z.boolean().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   }, async (args: {
@@ -183,7 +238,7 @@ export function installWorkbench(
     workspace_id?: string; workspace_name?: string; workspace_path?: string;
     task_id?: string; task_title?: string; task_description?: string;
     environment_mode?: "local" | "parallel"; starting_ref?: string;
-    bind_current?: boolean; create_missing?: boolean;
+    bind_current?: boolean; create_missing?: boolean; assign_next_chatgpt?: boolean; delegate_as_child?: boolean;
   }) => {
     const workspaceSelector = {
       workspaceId: args.workspace_id,
@@ -234,6 +289,10 @@ export function installWorkbench(
 
     if (args.action === "create_task") {
       if (!args.task_title?.trim()) throw new Error("task_title is required for create_task");
+      if (args.bind_current && args.assign_next_chatgpt) throw new Error("create_task cannot bind the current chat and reserve the same task for the next ChatGPT session");
+      if (args.assign_next_chatgpt && args.environment_mode === "local") {
+        throw new Error("AGENT_ASSIGNMENT_ISOLATION_REQUIRED: a task reserved for another ChatGPT session must use a managed parallel worktree");
+      }
       const bindSessionId = args.bind_current ? pinnedSessionId : undefined;
       if (args.bind_current) {
         if (!bindSessionId) throw new Error("AGENT_TARGET_SESSION_REQUIRED: current MCP session is unavailable");
@@ -246,12 +305,16 @@ export function installWorkbench(
       const hasSelector = args.workspace_id || args.workspace_name || args.workspace_path;
       const currentWorkspaceId = (await getWorkbench()).tasks.find(item => item.id === authority.taskId)!.workspaceId;
       const targetWorkspace = await resolveWorkspaceForControl(hasSelector ? workspaceSelector : { workspaceId: currentWorkspaceId });
+      const environmentMode = args.environment_mode || (args.delegate_as_child || args.assign_next_chatgpt ? "parallel" : "local");
       const created = await createTask(
         args.task_title,
         undefined,
         targetWorkspace.id,
-        { mode: args.environment_mode === "parallel" ? "worktree" : "local", startingRef: args.starting_ref },
-        { description: args.task_description, select: true, controlAuthority: { ...authority, requireIdle: args.bind_current } },
+        { mode: environmentMode === "parallel" ? "worktree" : "local", startingRef: args.starting_ref },
+        { description: args.task_description, select: !args.delegate_as_child, controlAuthority: { ...authority, requireIdle: args.bind_current },
+          assignNextChatgpt: args.assign_next_chatgpt,
+          parentTaskId: args.delegate_as_child ? authority.taskId : undefined,
+          createdBySessionId: pinnedSessionId },
       );
       if (args.bind_current) {
         const receipt = await targetAgentSession(bindSessionId!, clientType, {
@@ -271,9 +334,13 @@ export function installWorkbench(
         authoritative: false,
         created: true,
         workspace: { id: targetWorkspace.id, name: targetWorkspace.name, path: targetWorkspace.path },
-        task: { id: created.id, title: created.title, execution_path: taskExecutionPath(created), branch: created.execution.branch || null },
+        task: { id: created.id, title: created.title, execution_path: taskExecutionPath(created), branch: created.execution.branch || null, parent_task_id: created.parentTaskId || null },
+        assignment: args.assign_next_chatgpt ? { client_type: "chatgpt", status: "queued" } : null,
         current_chat_unchanged: true,
-        message: "Task is created and selected in Workbench. Use action=target or bind_current=true to bind this chat.",
+        dashboard_selection_unchanged: Boolean(args.delegate_as_child),
+        message: args.delegate_as_child
+          ? "Child task created without changing the dashboard selection. The queued ChatGPT lease is claimed independently by orchestration."
+          : "Task is created and selected in Workbench. Use action=target or bind_current=true to bind this chat.",
       }) }] };
     }
 

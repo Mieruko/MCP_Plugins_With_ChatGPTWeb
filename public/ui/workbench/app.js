@@ -10,9 +10,11 @@ import { createCheckpoint, loadHistory, restoreCurrentCheckpoint } from './histo
 import { loadProcesses, resetProcessConsole, setupProcessConsole } from './terminal.js';
 import { setupChatSessions } from './chat-sessions.js';
 
-let eventsController;
+let eventsSource;
 let refreshTimer;
 let liveTimer;
+let fallbackRevision = 0;
+let workbenchLoadGeneration = 0;
 let editingMcpServerId = null;
 let workspaceSourceMode = 'local';
 let folderBrowserTarget = 'local';
@@ -35,8 +37,8 @@ const pendingScopes = new Set();
 const pendingEventTaskIds = new Set();
 
 function modeLabel(mode) {
-  if (isBasic()) return mode === 'full' ? 'No prompts' : mode === 'auto' ? 'Safe edits' : 'Ask first';
-  return mode === 'full' ? 'Full' : mode === 'auto' ? 'Auto' : 'Ask';
+  if (isBasic()) return mode === 'full' ? 'Full access' : mode === 'auto' ? 'Approve for me' : 'Ask for approval';
+  return mode === 'full' ? 'Full access' : mode === 'auto' ? 'Approve for me' : 'Ask for approval';
 }
 
 function taskLifecycleLabel(value) {
@@ -89,6 +91,15 @@ function selectedTaskEnvironment() {
 function setSelectedPolicyMode(mode) {
   const input = document.querySelector(`input[name="policy-mode"][value="${mode}"]`);
   if (input) input.checked = true;
+}
+
+function updatePolicyScopeHelp() {
+  const task = currentTask();
+  const executionPath = task?.execution?.path || currentWorkspace()?.path || '';
+  const restricted = Boolean($('policy-scope')?.checked);
+  $('policy-scope-help').textContent = restricted
+    ? (executionPath ? `Files and commands stay inside ${executionPath}.` : 'Files and commands stay inside this workspace.')
+    : 'Machine scope allows authorized commands and paths outside this workspace using the server process permissions.';
 }
 
 function closeDialog(id) {
@@ -171,9 +182,7 @@ function renderContextPanels() {
 
   $('permission-workspace-name').textContent = workspaceName;
   $('permission-workspace-path').textContent = executionPath || '—';
-  $('policy-scope-help').textContent = executionPath
-    ? `ChatGPT can only access files inside ${executionPath}.`
-    : 'ChatGPT can only access files inside this workspace.';
+  updatePolicyScopeHelp();
 
   $('settings-workspace-name').textContent = workspaceName;
   $('settings-workspace-path').textContent = workspacePath || '—';
@@ -220,6 +229,7 @@ function renderHeader() {
   if (task) {
     setSelectedPolicyMode(task.policy.mode);
     $('policy-scope').checked = task.policy.workspaceOnly;
+    updatePolicyScopeHelp();
   }
   const availability = workspaceAvailabilityLabel(workspace);
   $('status-workspace').replaceChildren(
@@ -518,9 +528,12 @@ function openSystemSettings() {
 }
 
 async function loadWorkbenchState() {
+  const generation = ++workbenchLoadGeneration;
   const previousTaskId = state.taskId;
   const data = await api('/api/workbench');
+  if (generation !== workbenchLoadGeneration) return state.data || data;
   state.data = data;
+  state.liveRevision = Math.max(state.liveRevision || 0, Number(data.revision || 0));
   const workspaces = data.workspaces || [];
   const tasks = data.tasks || [];
   if (!workspaces.some(workspace => workspace.id === state.workspaceId)) {
@@ -580,19 +593,26 @@ async function fullRefresh() {
 async function connect() {
   await fullRefresh();
   state.connected = true;
+  fallbackRevision = Number(state.liveRevision || 0);
   startEvents();
   clearInterval(liveTimer);
   liveTimer = setInterval(() => {
     if (!state.connected) return;
     const before = currentWorkspace()?.availability || 'ready';
-    void loadWorkbenchState().then(() => {
+    const beforeRevision = fallbackRevision;
+    void loadWorkbenchState().then(data => {
+      const serverRevision = Number(data?.revision || state.liveRevision || 0);
+      const revisionChanged = serverRevision !== beforeRevision;
+      fallbackRevision = Math.max(fallbackRevision, serverRevision);
       const after = currentWorkspace()?.availability || 'ready';
       if (before !== after) return fullRefresh();
       if (!workspaceIsReady()) {
         renderHeader();
         return Promise.allSettled([loadConnections(), state.taskId ? loadProcesses() : Promise.resolve()]);
       }
-      return Promise.allSettled([loadAgents(), loadProcesses(), loadConnections()]).then(renderHeader);
+      const jobs = [loadAgents(), loadProcesses(), loadConnections()];
+      if (revisionChanged) jobs.push(loadChanges(), loadHistory());
+      return Promise.allSettled(jobs).then(renderHeader);
     }).catch(error => setStatus(error.message));
   }, 15000);
 }
@@ -650,35 +670,29 @@ function scheduleTypedRefresh(change = {}) {
   }, 120);
 }
 
-async function startEvents() {
-  eventsController?.abort();
-  eventsController = new AbortController();
-  try {
-    const response = await fetch('/api/workbench/events', {
-      credentials: 'same-origin',
-      signal: eventsController.signal,
-    });
-    if (!response.ok) throw new Error('Live updates unavailable');
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let pending = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      pending += decoder.decode(value, { stream: true });
-      let end;
-      while ((end = pending.indexOf('\n\n')) !== -1) {
-        const frame = pending.slice(0, end); pending = pending.slice(end + 2);
-        if (!frame.split('\n').includes('event: change')) continue;
-        const dataLine = frame.split('\n').find(line => line.startsWith('data:'));
-        if (!dataLine) { scheduleTypedRefresh(); continue; }
-        try { scheduleTypedRefresh(JSON.parse(dataLine.slice(5).trim())); }
-        catch { scheduleTypedRefresh(); }
-      }
+function startEvents() {
+  eventsSource?.close();
+  const after = Number(state.liveRevision || 0);
+  eventsSource = new EventSource(`/api/workbench/events?afterRevision=${encodeURIComponent(after)}`, { withCredentials: true });
+  eventsSource.addEventListener('change', event => {
+    let change = {};
+    try { change = JSON.parse(event.data || '{}'); } catch {}
+    const revision = Number(change.revision || event.lastEventId || 0);
+    const previous = Number(state.liveRevision || 0);
+    if (change.reason === 'revision-gap' || (revision > previous + 1 && previous > 0)) {
+      state.liveRevision = revision;
+      void fullRefresh().catch(error => setStatus(error.message));
+      return;
     }
-  } catch (error) {
-    if (error.name !== 'AbortError') setStatus('Live updates disconnected');
-  }
+    if (revision > previous) state.liveRevision = revision;
+    scheduleTypedRefresh(change);
+  });
+  eventsSource.onopen = () => {
+    if (state.connected) setStatus('Ready');
+  };
+  eventsSource.onerror = () => {
+    setStatus('Live updates disconnected · reconnecting…');
+  };
 }
 
 async function switchTask(taskId) {
@@ -1099,6 +1113,13 @@ function setupEvents() {
       if (!$('new-task-starting-ref').value.trim()) $('new-task-starting-ref').value = state.git?.branch || 'main';
     };
   });
+  document.querySelectorAll('input[name="policy-mode"]').forEach(input => {
+    input.onchange = () => {
+      $('policy-scope').checked = selectedPolicyMode() !== 'full';
+      updatePolicyScopeHelp();
+    };
+  });
+  $('policy-scope').onchange = updatePolicyScopeHelp;
   document.querySelectorAll('.filter-chip').forEach(button => button.onclick = () => setChangeFilter(button.dataset.filter));
   $('agent-change-filter').onchange = () => setAgentFilter($('agent-change-filter').value);
   document.querySelectorAll('.changes-tab').forEach(button => button.onclick = () => showChangesTab(button.dataset.tab));
@@ -1234,5 +1255,20 @@ async function bootstrap() {
     setStatus(error?.message || 'Workbench authentication unavailable. Restart with npm start.');
   }
 }
+
+window.addEventListener('beforeunload', () => {
+  if (eventsSource) {
+    eventsSource.close();
+    eventsSource = null;
+  }
+  if (liveTimer) {
+    clearInterval(liveTimer);
+    liveTimer = null;
+  }
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+});
 
 void bootstrap();

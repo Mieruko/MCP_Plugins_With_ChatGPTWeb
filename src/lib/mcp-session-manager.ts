@@ -6,7 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
-import { resolveSessionTask, getWorkbench, markAgentSessionClosed, taskExecutionPath } from "./workbench.js";
+import { closeSessionReviewRun, resolveSessionTask, getWorkbench, markAgentSessionClosed, taskExecutionPath } from "./workbench.js";
 import { executionContext } from "./workbench-context.js";
 import { buildInstructionContext } from "./instruction-context.js";
 
@@ -25,9 +25,14 @@ const ACTIVE_SESSION_WINDOW_MS = Math.max(
   1_000,
   parseInt(process.env.MCP_ACTIVE_SESSION_MS || "60000", 10)
 ); // fallback when a client does not keep a GET/SSE stream open
+const REVIEW_RUN_QUIESCENCE_MS = Math.max(
+  1_000,
+  parseInt(process.env.WORKBENCH_REVIEW_QUIESCENCE_MS || "15000", 10)
+); // fallback turn boundary only when the host does not supply a stable turn/run id
 
 const lastTransportErrors: Record<string, string> = {};
 const sessionOpChains = new Map<string, Promise<void>>();
+const reviewQuiescenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export interface McpSession {
   transport: StreamableHTTPServerTransport;
@@ -215,18 +220,41 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     return end;
   }
 
+  function cancelReviewQuiescence(sessionId: string): void {
+    const timer = reviewQuiescenceTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    reviewQuiescenceTimers.delete(sessionId);
+  }
+
+  function scheduleReviewQuiescence(sessionId: string): void {
+    cancelReviewQuiescence(sessionId);
+    const timer = setTimeout(() => {
+      reviewQuiescenceTimers.delete(sessionId);
+      const session = sessions[sessionId];
+      if (!session || session.inFlightRequests > 0) return;
+      void closeSessionReviewRun(sessionId).catch(error =>
+        console.warn(`[MCP] Failed to close quiescent review run ${sessionId}: ${String(error)}`)
+      );
+    }, REVIEW_RUN_QUIESCENCE_MS);
+    timer.unref?.();
+    reviewQuiescenceTimers.set(sessionId, timer);
+  }
+
   async function trackRequest(sessionId: string, op: () => Promise<void>): Promise<void> {
     const session = sessions[sessionId];
     if (!session) {
       await op();
       return;
     }
+    cancelReviewQuiescence(sessionId);
     touch(sessionId);
     session.inFlightRequests += 1;
     try {
       await op();
     } finally {
       session.inFlightRequests = Math.max(0, session.inFlightRequests - 1);
+      if (session.inFlightRequests === 0) scheduleReviewQuiescence(sessionId);
     }
   }
 
@@ -251,6 +279,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
   function removeSession(sessionId: string, reason: string): void {
     cancelDeleteGrace(sessionId);
+    cancelReviewQuiescence(sessionId);
     const session = sessions[sessionId];
     if (!session) return;
     getUpstreamManager().unregisterMcpServer(session.server);
