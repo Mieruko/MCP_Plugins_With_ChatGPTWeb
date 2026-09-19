@@ -7,8 +7,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "../server-factory.js";
 import { getUpstreamManager } from "./mcp-upstream-manager.js";
 import { closeSessionReviewRun, resolveSessionTask, getWorkbench, markAgentSessionClosed, taskExecutionPath } from "./workbench.js";
-import { executionContext } from "./workbench-context.js";
+import { executionContext, mcpPrincipalContext } from "./workbench-context.js";
 import { buildInstructionContext } from "./instruction-context.js";
+import { conversationActivitySnapshots, forgetConversationTransport, isConversationTransport } from "./conversation-activity.js";
 
 
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
@@ -116,6 +117,12 @@ function clientInfoLooksLikeChatGpt(clientInfo?: { name: string; version?: strin
 
 function requestClientType(res: Response, clientInfo?: { name: string; version?: string }): McpSession["clientType"] {
   return res.locals?.mcpAuth?.chatgpt === true || clientInfoLooksLikeChatGpt(clientInfo) ? "chatgpt" : "mcp";
+}
+
+function authenticatedRequest<T>(res: Response, invoke: () => Promise<T>): Promise<T> {
+  const auth = res.locals.mcpAuth;
+  const principal = auth?.kind === "oauth" ? `oauth:${auth.clientId}` : "local";
+  return mcpPrincipalContext.run(principal, invoke);
 }
 
 function isSessionActive(session: McpSession, now = Date.now()): boolean {
@@ -284,6 +291,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
     if (!session) return;
     getUpstreamManager().unregisterMcpServer(session.server);
     delete sessions[sessionId];
+    forgetConversationTransport(sessionId);
     delete lastTransportErrors[sessionId];
     sessionOpChains.delete(sessionId);
     void markAgentSessionClosed(sessionId).catch(error => console.warn(`[MCP] Failed to persist closed agent binding ${sessionId}: ${String(error)}`));
@@ -442,13 +450,15 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
     count() {
       const now = Date.now();
-      return Object.values(sessions).filter(session => isSessionActive(session, now)).length;
+      return Object.entries(sessions).filter(([id, session]) => !isConversationTransport(id) && isSessionActive(session, now)).length
+        + conversationActivitySnapshots(ACTIVE_SESSION_WINDOW_MS, SESSION_TTL_MS).filter(item => item.active).length;
     },
 
     list() {
       const now = Date.now();
       return Object.entries(sessions)
-        .map(([id, session]) => ({
+        .filter(([id]) => !isConversationTransport(id))
+        .map<McpSessionSummary>(([id, session]) => ({
           id,
           taskId: session.taskId,
           workspace: session.workspace,
@@ -462,6 +472,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
           inFlightRequests: session.inFlightRequests,
           state: sessionState(session, now),
         }))
+        .concat(conversationActivitySnapshots(ACTIVE_SESSION_WINDOW_MS, SESSION_TTL_MS))
         .sort((a, b) => b.lastAccessedAt.localeCompare(a.lastAccessedAt));
     },
 
@@ -503,7 +514,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
 
       const sid = headerSessionId || session.transport.sessionId;
       const run = async () => {
-        await session.transport.handleRequest(req, res, body);
+        await authenticatedRequest(res, () => session.transport.handleRequest(req, res, body));
         const activeSid = session.transport.sessionId;
         if (activeSid) touch(activeSid);
       };
@@ -525,7 +536,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         session.transport.sessionId || (req.headers["mcp-session-id"] as string | undefined);
       if (sid) touch(sid);
       const run = async () => {
-        await session.transport.handleRequest(req, res, body);
+        await authenticatedRequest(res, () => session.transport.handleRequest(req, res, body));
       };
       // GET owns a potentially indefinite SSE stream. Queuing it with POST
       // prevents every subsequent tool call from running until SSE disconnects.
@@ -546,8 +557,13 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
         }
         return;
       }
-      if (notification) {
-        await run();
+      const toolCall = req.method === "POST" && body !== null && typeof body === "object"
+        && "method" in body && body.method === "tools/call";
+      if (notification || toolCall) {
+        // Calls can carry different conversations over one transport. Resource
+        // locks in dispatch, not the HTTP connection, coordinate mutations.
+        if (sid) await trackRequest(sid, run);
+        else await run();
         return;
       }
       if (sid) {
@@ -596,7 +612,7 @@ export function createSessionManager(config: SessionManagerConfig): SessionManag
       const headers = { ...req.headers, "mcp-session-id": staleSessionId };
       const patchedReq = Object.assign(req, { headers });
       await enqueueSessionOp(staleSessionId, async () => {
-        await trackRequest(staleSessionId, () => recovered.transport.handleRequest(patchedReq, res, body));
+        await trackRequest(staleSessionId, () => authenticatedRequest(res, () => recovered.transport.handleRequest(patchedReq, res, body)));
       });
       return true;
     },

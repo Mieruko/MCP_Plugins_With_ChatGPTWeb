@@ -321,8 +321,8 @@ export async function runInteractiveSetup({ root, launchCwd, force = false } = {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
     console.log("\nThe Replace - first-time setup\n");
-    console.log("  1) Cloudflare Quick Tunnel  - easiest, OAuth works, public URL changes each run");
-    console.log("  2) OpenAI Secure MCP Tunnel - stable tunnel, needs Tunnel ID + Runtime API key");
+    console.log("  1) Cloudflare Quick Tunnel  - quick setup, OAuth works, public URL changes each run");
+    console.log("  2) OpenAI Secure MCP Tunnel - RECOMMENDED (Windows), stable tunnel, needs Tunnel ID + Runtime API key");
     console.log("  3) Local only               - no public tunnel\n");
 
     const currentMode = String(env.TUNNEL_MODE || "").toLowerCase();

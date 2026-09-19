@@ -4,6 +4,7 @@ export type ToolProfileName = "full" | "slim";
 export const SLIM_CHATGPT_TOOLS = new Set([
   "workbench",
   "workbench_control",
+  "task_dispatch",
   "task_handoff",
   "task_complete",
   "github",

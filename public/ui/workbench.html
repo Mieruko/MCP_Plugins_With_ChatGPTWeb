@@ -709,7 +709,7 @@
         <div class="chat-layout-copy">
           <small>LAYOUT</small>
           <strong>Arrange ChatGPT Web windows</strong>
-          <span>No model API. Prompts stay local until you copy them.</span>
+          <span>No model API. Prompts stay local until copied. Choose one task per window and confirm it in that chat. Shared checkouts allow different-file edits in parallel; same-file edits and shell/Git commands are serialized.</span>
         </div>
         <div class="chat-layout-actions" aria-label="Chat window layout">
           <button class="chat-layout-button" data-chat-layout="1" type="button" title="One window">1</button>
@@ -723,7 +723,7 @@
         <span id="chat-session-live-summary">0 connected · 0 waiting</span>
       </div>
       <div id="chat-session-grid" class="chat-session-grid"></div>
-      <p id="chat-window-status" class="chat-window-status">Choose a layout or open one ChatGPT window from a card.</p>
+      <p id="chat-window-status" class="chat-window-status" role="status" aria-live="polite">Select a different task in each slot, then copy its assignment prompt into that ChatGPT window. Verify the exact task ID before coding.</p>
     </div>
   </dialog>
 

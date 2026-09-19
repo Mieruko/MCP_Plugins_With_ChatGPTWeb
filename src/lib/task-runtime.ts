@@ -2,6 +2,7 @@ export type TaskRuntimeProcessRole = "process" | "preview";
 
 interface TaskRuntimeProcessController {
   taskId: string;
+  sessionId?: string;
   id: string;
   pid?: number;
   command: string;
@@ -14,6 +15,7 @@ interface TaskRuntimeProcessController {
 
 export interface TaskRuntimeProcessSnapshot {
   taskId: string;
+  sessionId?: string;
   id: string;
   pid?: number;
   command: string;
@@ -56,6 +58,7 @@ export function getTaskRuntime(taskId: string): TaskRuntimeSnapshot {
     .filter(item => item.taskId === taskId)
     .map(item => ({
       taskId: item.taskId,
+      ...(item.sessionId ? { sessionId: item.sessionId } : {}),
       id: item.id,
       ...(item.pid === undefined ? {} : { pid: item.pid }),
       command: item.command,

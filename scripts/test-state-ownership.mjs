@@ -47,6 +47,16 @@ if (process.argv.includes('--child')) {
     await fs.unlink(incomplete);
     console.log('OK incomplete live ownership claim is preserved and excludes another server');
 
+    if (process.platform === 'win32') {
+      const recycled = path.join(claims, `${process.pid}.json`);
+      await fs.writeFile(recycled, JSON.stringify({ pid: process.pid, startedAt: '2000-01-01T00:00:00.000Z' }));
+      const afterPidReuse = contender();
+      assert.equal((await afterPidReuse.result).claimed, true);
+      await release(afterPidReuse);
+      await fs.unlink(recycled);
+      console.log('OK a stale claim does not block startup after Windows recycles its PID');
+    }
+
     const owner = contender();
     assert.equal((await owner.result).claimed, true);
     const duplicate = contender();

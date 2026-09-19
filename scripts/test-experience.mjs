@@ -167,6 +167,9 @@ try {
   await request(`/api/workbench/tasks/${completeLocal.id}/select`, {});
   const completionSession = await connect();
   assert.equal(payload(await call(completionSession, 'workbench')).task.id, completeLocal.id);
+  denied(await call(completionSession, 'task_complete'), /SESSION_TASK_UNCONFIRMED/);
+  assert.equal(payload(ok(await call(completionSession, 'workbench_control', { action: 'target', task_id: completeLocal.id, create_missing: false }))).task.id, completeLocal.id);
+  assert.equal(payload(ok(await call(completionSession, 'workbench_control', { action: 'status' }))).session.task_confirmed, true);
   const completionResult = payload(ok(await call(completionSession, 'task_complete')));
   assert.equal(completionResult.lifecycle, 'completed');
   assert.equal(completionResult.status, 'finished');

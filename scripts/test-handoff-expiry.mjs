@@ -13,6 +13,8 @@ const wb = await import('../dist/lib/workbench.js');
 const now = Date.now;
 try {
   const id = await wb.resolveDefaultTask(tmp);
+  assert.equal(await wb.resolveSessionTask('fixture-session', tmp, 'chatgpt'), id,
+    'approval fixture must have a real Workbench session binding');
   const args = { action: 'update', summary: 'must never be written' };
   let invoked = 0;
   const result = await wb.dispatch(id, 'task_handoff', args, async () => {

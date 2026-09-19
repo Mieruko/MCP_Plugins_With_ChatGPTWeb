@@ -12,6 +12,8 @@ export interface AgentBinding {
   clientType: AgentClientType;
   createdAt: string;
   lastSeenAt: string;
+  /** A dashboard fallback is provisional until THIS MCP session explicitly targets its task. */
+  taskConfirmed?: boolean;
   closedAt?: string;
 }
 
@@ -115,6 +117,7 @@ export function claimSessionTask(
     fallbackTaskId?: string;
     workspaceId?: string;
     taskExists: (taskId: string) => boolean;
+    fallbackConfirmed?: boolean;
     now?: string;
   },
 ): { taskId: string; binding: AgentBinding; claimedAssignmentId?: string; created: boolean } {
@@ -161,6 +164,7 @@ export function claimSessionTask(
     clientType: input.clientType,
     createdAt: now,
     lastSeenAt: now,
+    taskConfirmed: input.clientType !== "chatgpt" || Boolean(claimedAssignmentId) || input.fallbackConfirmed !== false,
   };
   state.agentBindings.push(binding);
   return { taskId, binding, claimedAssignmentId, created: true };

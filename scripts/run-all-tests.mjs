@@ -70,6 +70,9 @@ const unitScripts = [
   "scripts/test-continuity.mjs",
   "scripts/test-handoff-expiry.mjs",
   "scripts/test-control-permissions.mjs",
+  "scripts/test-task-dispatch.mjs",
+  "scripts/test-parallel-sessions.mjs",
+  "scripts/test-conversation-routing.mjs",
   "scripts/test-workbench.mjs",
   "scripts/test-experience.mjs",
 ];

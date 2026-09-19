@@ -12,6 +12,9 @@ export interface ExecutionContext {
 
 export const executionContext = new AsyncLocalStorage<ExecutionContext>();
 
+// Set only by the authenticated HTTP entrypoint, never by tool arguments.
+export const mcpPrincipalContext = new AsyncLocalStorage<string>();
+
 export function childEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env, ...(executionContext.getStore()?.environment || {}) };
   for (const name of ["ADMIN_TOKEN", "MCP_AUTH_TOKEN", "OPENAI_TUNNEL_API_KEY", "WORKBENCH_BOOTSTRAP_TOKEN"]) delete env[name];

@@ -1,5 +1,6 @@
-import { state, currentWorkspace } from './state.js';
+import { state, currentWorkspace, currentWorkspaceTasks } from './state.js';
 import { $, el, setStatus } from './dom.js';
+import { assignmentPrompt, sharedCheckoutWarning, slotIssue } from './session-slots.js';
 
 const CHATGPT_URL = 'https://chatgpt.com/';
 const SLOT_COUNT = 4;
@@ -23,6 +24,23 @@ function savePrompts(prompts) {
   localStorage.setItem(storageKey(), JSON.stringify(prompts));
 }
 
+function assignmentKey() {
+  return `replace-chat-task-slots:${currentWorkspace()?.id || 'global'}`;
+}
+
+function readAssignments() {
+  try {
+    const value = JSON.parse(localStorage.getItem(assignmentKey()) || '[]');
+    return Array.from({ length: SLOT_COUNT }, (_, index) => String(value[index] || ''));
+  } catch {
+    return Array(SLOT_COUNT).fill('');
+  }
+}
+
+function saveAssignments(ids) {
+  localStorage.setItem(assignmentKey(), JSON.stringify(ids));
+}
+
 function workspaceAgents() {
   const workspace = currentWorkspace();
   if (!workspace) return [];
@@ -32,6 +50,7 @@ function workspaceAgents() {
 function agentStatus(agent) {
   if (!agent) return { label: 'Not connected', key: 'idle' };
   if (agent.queued) return { label: 'Waiting', key: 'queued' };
+  if (agent.taskConfirmed === false) return { label: 'Unassigned (confirm task)', key: 'idle' };
   if (agent.status === 'approval_required') return { label: 'Approval', key: 'approval' };
   if (agent.status === 'working') return { label: 'Working', key: 'working' };
   if (agent.active) return { label: 'Connected', key: 'active' };
@@ -100,19 +119,42 @@ async function copyPrompt(text, index) {
   setStatus(`ChatGPT #${index + 1} prompt copied`);
 }
 
-function renderSlot(index, prompt, agent, prompts) {
+function renderSlot(index, prompt, task, agents, selectedIds, prompts, tasks) {
+  // Agent rows are ordered by activity, NOT by browser window; never pair them by array index.
+  const matching = agents.filter(agent => agent.taskId === task?.id && !agent.queued && agent.taskConfirmed !== false);
+  const agent = matching.find(item => item.active) || matching[0];
   const status = agentStatus(agent);
+  const issue = slotIssue(task, tasks, selectedIds, index, agents);
+  const sharedWarning = sharedCheckoutWarning(task, tasks, selectedIds, index);
   const card = el('article', undefined, 'chat-slot-card');
   const head = el('div', undefined, 'chat-slot-head');
   const identity = el('div', undefined, 'chat-slot-identity');
-  identity.append(el('small', `CHATGPT #${index + 1}`), el('strong', agent?.taskTitle || 'Prompt workspace'));
-  head.append(identity, el('span', status.label, `chat-slot-status ${status.key}`));
+  identity.append(el('small', `CHATGPT #${index + 1}`), el('strong', task?.title || 'Choose a task'));
+  head.append(identity, el('span', agent ? `Task: ${status.label}` : 'Not verified', `chat-slot-status ${agent ? status.key : 'idle'}`));
+
+  const selector = el('label', 'Assign task to this window', 'chat-slot-task-label');
+  const select = document.createElement('select');
+  select.className = 'chat-slot-task-select';
+  select.setAttribute('aria-label', `Task for ChatGPT window ${index + 1}`);
+  select.append(new Option('Select a task…', ''));
+  for (const candidate of tasks.filter(item => ['open', 'blocked'].includes(item.lifecycle))) {
+    select.append(new Option(`${candidate.title} · ${candidate.execution?.mode === 'worktree' ? 'isolated worktree' : 'shared checkout'}`, candidate.id));
+  }
+  select.value = task?.id || '';
+  select.onchange = () => {
+    selectedIds[index] = select.value;
+    saveAssignments(selectedIds);
+    renderChatSessions();
+  };
+  selector.append(select);
 
   const meta = el('div', undefined, 'chat-slot-meta');
   meta.append(
-    el('span', agent?.branch || 'No task bound'),
-    el('span', agent ? `${agent.changedPaths?.length || 0} changed file${agent.changedPaths?.length === 1 ? '' : 's'}` : 'Open ChatGPT and connect MCP'),
+    el('span', task?.execution?.branch || 'No separate branch'),
+    el('span', agent ? `${matching.length} MCP session(s) on task; window identity unverified` : 'No MCP session verified for this window'),
   );
+
+  const safety = el('p', issue || sharedWarning || 'Ready to copy assignment instructions. Verify the task ID in ChatGPT before working.', `chat-slot-safety${issue || sharedWarning ? ' attention' : ''}`);
 
   const textarea = document.createElement('textarea');
   textarea.className = 'chat-slot-prompt';
@@ -123,29 +165,31 @@ function renderSlot(index, prompt, agent, prompts) {
   const actions = el('div', undefined, 'chat-slot-actions');
   const copy = el('button', 'Copy prompt', 'mini-action');
   copy.type = 'button';
-  copy.disabled = !prompt.trim();
+  copy.disabled = Boolean(issue);
   textarea.oninput = () => {
     prompts[index] = textarea.value;
     savePrompts(prompts);
-    copy.disabled = !textarea.value.trim();
+    copy.disabled = Boolean(issue);
   };
-  copy.onclick = () => void copyPrompt(textarea.value, index).catch(error => setStatus(error.message));
+  copy.onclick = () => void copyPrompt(assignmentPrompt(task, currentWorkspace(), textarea.value), index).catch(error => setStatus(error.message));
 
   const open = el('button', windowHandles.get(index) && !windowHandles.get(index).closed ? 'Focus ChatGPT' : 'Open ChatGPT', 'secondary-button compact-action chat-slot-open');
   open.type = 'button';
+  open.disabled = Boolean(issue);
   open.onclick = () => {
+    if (issue) { setWindowMessage(issue, true); return; }
     const rects = layoutRects(selectedLayout);
     const rect = rects[Math.min(index, rects.length - 1)] || layoutRects(1)[0];
     if (!openSlot(index, rect)) {
       setWindowMessage('Chrome blocked the window. Allow pop-ups for this local Workbench, then retry.', true);
       return;
     }
-    setWindowMessage(`ChatGPT #${index + 1} ready. Copy the prompt and paste it into that window.`);
+    setWindowMessage(`ChatGPT #${index + 1} opened for ${task.title}. Copy the assignment prompt, paste it there, and verify the task ID. Opening a window does not bind its MCP session.`);
     renderChatSessions();
   };
 
   actions.append(copy, open);
-  card.append(head, meta, textarea, actions);
+  card.append(head, selector, meta, safety, textarea, actions);
   return card;
 }
 
@@ -153,9 +197,12 @@ export function renderChatSessions() {
   if (!$('chat-sessions-dialog')) return;
   const agents = workspaceAgents();
   const prompts = readPrompts();
+  const selectedIds = readAssignments();
+  const tasks = currentWorkspaceTasks();
   $('chat-session-workspace').textContent = currentWorkspace()?.name || 'No workspace';
   $('chat-session-live-summary').textContent = `${agents.filter(agent => agent.active).length} connected · ${agents.filter(agent => agent.queued).length} waiting`;
-  $('chat-session-grid').replaceChildren(...Array.from({ length: SLOT_COUNT }, (_, index) => renderSlot(index, prompts[index], agents[index], prompts)));
+  $('chat-session-grid').replaceChildren(...Array.from({ length: SLOT_COUNT }, (_, index) =>
+    renderSlot(index, prompts[index], tasks.find(item => item.id === selectedIds[index]), agents, selectedIds, prompts, tasks)));
   $('chat-sessions-count').textContent = String(agents.filter(agent => agent.active).length);
   document.querySelectorAll('[data-chat-layout]').forEach(button => button.classList.toggle('active', Number(button.dataset.chatLayout) === selectedLayout));
 }
@@ -163,12 +210,24 @@ export function renderChatSessions() {
 function openLayout(count) {
   selectedLayout = count;
   localStorage.setItem('replace-chat-layout', String(count));
+  const ids = readAssignments();
+  const tasks = currentWorkspaceTasks();
+  const agents = workspaceAgents();
+  for (let index = 0; index < count; index += 1) {
+    const issue = slotIssue(tasks.find(task => task.id === ids[index]), tasks, ids.slice(0, count), index, agents);
+    if (issue) {
+      setWindowMessage(`ChatGPT #${index + 1}: ${issue} Assign a different available task to each window.`, true);
+      renderChatSessions();
+      return;
+    }
+  }
   const rects = layoutRects(count);
   let blocked = 0;
   for (let index = 0; index < count; index += 1) {
     if (!openSlot(index, rects[index])) blocked += 1;
   }
-  setWindowMessage(blocked ? `${blocked} window${blocked === 1 ? '' : 's'} blocked. Allow pop-ups and click the layout again.` : `${count}-pane ChatGPT layout ready.`, Boolean(blocked));
+  const sharing = ids.slice(0, count).some((id, index) => sharedCheckoutWarning(tasks.find(task => task.id === id), tasks, ids.slice(0, count), index));
+  setWindowMessage(blocked ? `${blocked} window${blocked === 1 ? '' : 's'} blocked. Allow pop-ups and click the layout again.` : `${count} windows opened. Verify each exact task ID before work.${sharing ? ' Shared checkouts allow parallel chats, but mutating operations wait their turn and changes are visible to every task.' : ''}`, Boolean(blocked || sharing));
   renderChatSessions();
 }
 

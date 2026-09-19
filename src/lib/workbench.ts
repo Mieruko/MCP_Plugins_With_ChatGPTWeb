@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { childEnvironment, executionContext } from "./workbench-context.js";
@@ -65,6 +65,22 @@ export interface TaskHandoff {
   fromSessionId?: string;
   updatedAt: string;
 }
+/** Durable same-workspace instructions. These are NOT ChatGPT turns or executable jobs. */
+export interface TaskMessage {
+  id: string;
+  workspaceId: string;
+  sourceTaskId: string;
+  sourceSessionId: string;
+  targetTaskId: string;
+  targetSessionId?: string;
+  instruction: string;
+  createdAt: string;
+  status: "queued" | "claimed" | "completed" | "failed" | "cancelled";
+  claimedAt?: string;
+  claimedBySessionId?: string;
+  finishedAt?: string;
+  result?: string;
+}
 export interface TaskIntegration {
   targetBranch?: string;
   dependsOnTaskIds?: string[];
@@ -123,6 +139,7 @@ export interface AgentCoordinatorView {
   bindingId?: string;
   assignmentId?: string;
   sessionId?: string;
+  taskConfirmed?: boolean;
   taskId: string;
   taskTitle: string;
   taskKind: TaskKind;
@@ -234,7 +251,7 @@ export interface ReviewRun {
   closedAt?: string;
   status: "open" | "completed" | "interrupted";
 }
-interface State { version: 5; revision?: number; workspaces: Workspace[]; tasks: Task[]; operations: Operation[]; reviewRuns?: ReviewRun[]; checkpoints?: TaskCheckpoint[]; selectedWorkspaceId?: string; selectedTaskId?: string; agentBindings: AgentBinding[]; agentAssignments: AgentAssignment[]; portLeases: PortLease[] }
+interface State { version: 5; revision?: number; workspaces: Workspace[]; tasks: Task[]; operations: Operation[]; reviewRuns?: ReviewRun[]; checkpoints?: TaskCheckpoint[]; selectedWorkspaceId?: string; selectedTaskId?: string; agentBindings: AgentBinding[]; agentAssignments: AgentAssignment[]; taskMessages?: TaskMessage[]; portLeases: PortLease[] }
 const events = new EventEmitter();
 export type WorkbenchChangeScope = "state" | "workspaces" | "tasks" | "operations" | "checkpoints" | "workspace";
 export interface WorkbenchChange {
@@ -258,7 +275,10 @@ let initialization: Promise<void> | undefined;
 let globalQueue = Promise.resolve();
 let saveQueue = Promise.resolve();
 let portLeaseQueue = Promise.resolve();
-const workspaceQueues = new Map<string, Promise<void>>();
+// Locks are keyed by actual resources, not task IDs. A checkout-root lock
+// conflicts with every file below it (shell/Git/Undo), but independent file
+// edits need not wait for each other merely because they share a checkout.
+const resourceLocks: Array<{ paths: string[]; finished: Promise<void>; release: () => void }> = [];
 const activeChangeSets = new Map<string, { id: string; startedAt: number; lastAt: number; turnKeyHash?: string }>();
 let stateOwnerLockPath = "";
 let stateOwnerClaim: Promise<void> | undefined;
@@ -277,6 +297,41 @@ function processExists(pid: number): boolean {
     // Access denied means the process may be alive under another account.
     return true;
   }
+}
+
+interface StateOwnerClaim { pid: number; startedAt?: string; processStartedAt?: string }
+const STATE_OWNER_STARTUP_GRACE_MS = 30_000;
+const STATE_OWNER_START_TOLERANCE_MS = 5 * 60_000;
+
+/**
+ * Windows can recycle a dead process ID while its durable ownership claim is
+ * still present. Node can test whether a PID exists, but it cannot read that
+ * process' creation time directly, so use the built-in CIM provider only for
+ * old, otherwise-live claims. A failed identity check stays fail-closed.
+ */
+function windowsProcessStartedAt(pid: number): number | null | undefined {
+  const script = `$item = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop; if ($null -ne $item) { $item.CreationDate.ToUniversalTime().ToString(\"o\") }`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8", windowsHide: true, timeout: 5_000,
+  });
+  if (result.error || result.status !== 0) return undefined;
+  const raw = String(result.stdout || "").trim();
+  if (!raw) return null;
+  const value = Date.parse(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function claimBelongsToLiveProcess(claim: StateOwnerClaim): boolean {
+  if (!processExists(claim.pid)) return false;
+  const claimedProcessStart = Date.parse(claim.processStartedAt || claim.startedAt || "");
+  if (process.platform !== "win32" || !Number.isFinite(claimedProcessStart)) return true;
+  // A fresh claim may belong to a server that is still initializing. Preserve
+  // mutual exclusion without waiting for its HTTP listeners to become ready.
+  if (Date.now() - claimedProcessStart <= STATE_OWNER_STARTUP_GRACE_MS) return true;
+  const actualProcessStart = windowsProcessStartedAt(claim.pid);
+  if (actualProcessStart === null) return false;
+  if (actualProcessStart === undefined) return true;
+  return Math.abs(actualProcessStart - claimedProcessStart) <= STATE_OWNER_START_TOLERANCE_MS;
 }
 
 /**
@@ -301,6 +356,7 @@ async function claimStateOwner(): Promise<void> {
     port: Number(process.env.PORT || 0) || undefined,
     adminPort: Number(process.env.ADMIN_PORT || 0) || undefined,
     startedAt: new Date().toISOString(),
+    processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
   };
 
   // Publish our PID before inspecting other claims. Concurrent contenders may
@@ -311,11 +367,21 @@ async function claimStateOwner(): Promise<void> {
     let legacy: { pid?: number } | undefined;
     try { legacy = JSON.parse(await fs.readFile(path.join(root, "owner.lock"), "utf8")); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("WORKBENCH_STATE_IN_USE: legacy owner lock is unreadable; verify the previous server has stopped."); }
-    const owners = (await fs.readdir(claims)).flatMap(name => /^\d+\.json$/.test(name) ? [Number(name.slice(0, -5))] : []);
-    if (legacy?.pid) owners.push(legacy.pid);
-    const other = owners.find(pid => pid !== process.pid && processExists(pid));
+    const owners = await Promise.all((await fs.readdir(claims)).flatMap(name => /^\d+\.json$/.test(name) ? [{ name, pid: Number(name.slice(0, -5)) }] : [])
+      .map(async ({ name, pid }): Promise<StateOwnerClaim> => {
+        try {
+          const parsed = JSON.parse(await fs.readFile(path.join(claims, name), "utf8"));
+          return { pid: Number(parsed.pid) || pid, startedAt: parsed.startedAt, processStartedAt: parsed.processStartedAt };
+        } catch {
+          // An incomplete claim from a live PID is a concurrent startup. It
+          // must remain blocking until that process exits.
+          return { pid };
+        }
+      }));
+    if (legacy?.pid) owners.push({ pid: legacy.pid });
+    const other = owners.find(item => item.pid !== process.pid && claimBelongsToLiveProcess(item));
     if (other) {
-      throw new Error(`WORKBENCH_STATE_IN_USE: ${root} is owned or being claimed by PID ${other}. Give each running Local Coder / Workbench instance its own WORKBENCH_PATH.`);
+      throw new Error(`WORKBENCH_STATE_IN_USE: ${root} is owned or being claimed by PID ${other.pid}. Give each running Local Coder / Workbench instance its own WORKBENCH_PATH.`);
     }
     stateOwnerLockPath = lockPath;
   } catch (error) {
@@ -513,6 +579,7 @@ async function normalizeLoadedState(raw: any): Promise<State> {
     next.checkpoints ??= [];
     next.agentBindings ??= migrateLegacySessionTasks(next.sessionTasks, migratedAt);
     next.agentAssignments ??= [];
+    next.taskMessages ??= [];
     next.portLeases ??= [];
     // Existing installations retain their full task UI, regardless of the new default.
     // Repair a legacy/stale label that can end up as only a drive name (for
@@ -572,6 +639,8 @@ async function normalizeLoadedState(raw: any): Promise<State> {
     }
     next.agentBindings = next.agentBindings.filter(binding => next.tasks.some(task => task.id === binding.taskId));
     next.agentAssignments = next.agentAssignments.filter(assignment => next.tasks.some(task => task.id === assignment.taskId));
+    next.taskMessages = next.taskMessages.filter(message => next.tasks.some(task => task.id === message.sourceTaskId)
+      && next.tasks.some(task => task.id === message.targetTaskId));
     pruneExpiredAgentAssignments(next);
     const activeTaskIds = new Set(next.tasks.filter(task => !["archived", "completed"].includes(task.lifecycle)).map(task => task.id));
     const keptLeases: PortLease[] = [];
@@ -607,6 +676,7 @@ async function normalizeLoadedState(raw: any): Promise<State> {
     selectedTaskId: raw.selectedTaskId,
     agentBindings: migrateLegacySessionTasks(raw.sessionTasks || {}),
     agentAssignments: [],
+    taskMessages: [],
     portLeases: [],
   };
   state = migrated;
@@ -659,7 +729,7 @@ async function init(): Promise<void> {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      state = { version: 5, revision: 0, workspaces: [], tasks: [], operations: [], reviewRuns: [], checkpoints: [], agentBindings: [], agentAssignments: [], portLeases: [] };
+      state = { version: 5, revision: 0, workspaces: [], tasks: [], operations: [], reviewRuns: [], checkpoints: [], agentBindings: [], agentAssignments: [], taskMessages: [], portLeases: [] };
       const configuredProject = process.env.WORKSPACE_PATH?.split(";")[0]?.trim().replace(/^['"]|['"]$/g, "");
       if (defaultExperience() === "basic" && configuredProject) {
         const workspace = createWorkspaceRecord(await canonicalWorkspacePath(configuredProject));
@@ -704,7 +774,17 @@ function assertControlIdle(task: Task, sessionId: string): void {
   }
   const workspace = workspaceById(task.workspaceId);
   const tasks = workspace.experience === "basic" ? state.tasks.filter(item => item.workspaceId === workspace.id) : [task];
-  if (tasks.some(item => getTaskRuntime(item.id).running || previewLeaseForTask(item.id))) {
+  // An Advanced bootstrap session can temporarily share the selected task with
+  // another running chat. Its retarget must not wait for/stop THAT chat's
+  // processes. Only resources attributable to this session (or legacy unknown
+  // owners) prevent it from leaving. Basic still uses a single project writer.
+  const running = tasks.some(item => getTaskRuntime(item.id).processes.some(process => process.running
+    && (workspace.experience === "basic" || !process.sessionId || process.sessionId === sessionId)));
+  const previews = tasks.some(item => Boolean(previewLeaseForTask(item.id))
+    && (workspace.experience === "basic" || !state.agentBindings.some(binding => binding.taskId === item.id
+      && binding.sessionId !== sessionId && !binding.closedAt)
+      || getTaskRuntime(item.id).processes.some(process => process.role === "preview" && process.sessionId === sessionId)));
+  if (running || previews) {
     throw new Error("AGENT_TARGET_BUSY: stop managed processes and release preview ports before changing task.");
   }
 }
@@ -728,23 +808,22 @@ async function controlExclusive<T>(authority: ControlAuthority | undefined, fn: 
 
 async function workspacePathsExclusive<T>(paths: string[], fn: () => Promise<T>): Promise<T> {
   await init();
-  const keys = [...new Set(paths.map(value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value)))].sort();
-  const locks: Array<{ key: string; gate: Promise<void>; release: () => void }> = [];
+  const keys = [...new Set(paths.map(workspacePathKey))].sort();
+  const conflicts = (left: string, right: string) => left === right
+    || left.startsWith(`${right}${path.sep}`) || right.startsWith(`${left}${path.sep}`);
+  // Publish the reservation synchronously before awaiting predecessors. This
+  // gives overlapping requests FIFO ordering without serializing siblings.
+  const predecessors = resourceLocks.filter(item => item.paths.some(existing => keys.some(key => conflicts(existing, key))));
+  let release!: () => void;
+  const finished = new Promise<void>(resolve => { release = resolve; });
+  const reservation = { paths: keys, finished, release };
+  resourceLocks.push(reservation);
   try {
-    for (const key of keys) {
-      const prior = workspaceQueues.get(key) ?? Promise.resolve();
-      let release!: () => void;
-      const gate = new Promise<void>(resolve => { release = resolve; });
-      workspaceQueues.set(key, gate);
-      await prior;
-      locks.push({ key, gate, release });
-    }
+    await Promise.all(predecessors.map(item => item.finished));
     return await fn();
   } finally {
-    for (const lock of locks.reverse()) {
-      lock.release();
-      if (workspaceQueues.get(lock.key) === lock.gate) workspaceQueues.delete(lock.key);
-    }
+    resourceLocks.splice(resourceLocks.indexOf(reservation), 1);
+    release();
   }
 }
 export function subscribeWorkbench(listener: (change: WorkbenchChange) => void, afterRevision?: number): () => void {
@@ -1857,7 +1936,8 @@ export async function getAgentCoordinator(sessions: AgentSessionSnapshot[] = [])
   }
 
   const activeSessionsByTask = new Map<string, AgentSessionSnapshot[]>();
-  for (const session of chatGptSessions.filter(session => session.active || session.connected || session.inFlightRequests > 0)) {
+  for (const session of chatGptSessions.filter(session => (session.active || session.connected || session.inFlightRequests > 0)
+    && state.agentBindings.find(binding => binding.sessionId === session.id)?.taskConfirmed !== false)) {
     const list = activeSessionsByTask.get(session.taskId) || [];
     list.push(session);
     activeSessionsByTask.set(session.taskId, list);
@@ -1887,6 +1967,7 @@ export async function getAgentCoordinator(sessions: AgentSessionSnapshot[] = [])
       agentId: binding?.agentId,
       bindingId: binding?.id,
       sessionId: session.id,
+      taskConfirmed: binding?.taskConfirmed !== false,
       taskId: task.id,
       taskTitle: task.title,
       taskKind: task.kind,
@@ -2280,9 +2361,6 @@ export async function createTask(
     }
     const mode: PermissionMode = process.env.WORKBENCH_DEFAULT_MODE === "full" ? "full" : process.env.WORKBENCH_DEFAULT_MODE === "auto" ? "auto" : "ask";
     const taskId = randomUUID();
-    if (options?.assignNextChatgpt && environment?.mode === "local") {
-      throw new Error("AGENT_ASSIGNMENT_ISOLATION_REQUIRED: a task reserved for another ChatGPT session must use a managed worktree");
-    }
     const environmentMode = environment?.mode || (options?.assignNextChatgpt ? "worktree" : "local");
     let execution = localExecution(workspace.path);
     let integration: TaskIntegration | undefined;
@@ -2421,17 +2499,19 @@ export async function targetAgentSession(
       if (previousWorkspace?.writer?.sessionId === sessionId) delete previousWorkspace.writer;
       closeActiveReviewRuns(binding.taskId, "interrupted", sessionId);
       binding.taskId = task.id;
+      binding.taskConfirmed = true;
       binding.clientType = clientType;
       binding.lastSeenAt = now;
       delete binding.closedAt;
     } else if (binding) {
+      binding.taskConfirmed = true;
       binding.clientType = clientType;
       binding.lastSeenAt = now;
       delete binding.closedAt;
     } else {
       state.agentBindings.push({
         id: randomUUID(), agentId: randomUUID(), sessionId, taskId: task.id, clientType,
-        createdAt: now, lastSeenAt: now,
+        createdAt: now, lastSeenAt: now, taskConfirmed: true,
       });
     }
     cancelAssignment(state, task.id);
@@ -2463,7 +2543,10 @@ export async function switchSessionTask(
   authority: ControlAuthority,
 ) {
   if (!sessionId || authority.sessionId !== sessionId) throw new Error("CONTROL_SESSION_CHANGED: target must use the current session.");
-  return exclusive(async () => workspaceExclusive(authority.taskId, async () => {
+  // Session binding changes are metadata-only, serialized by the global
+  // coordinator. Acquiring the source checkout lock here would wait behind a
+  // DIFFERENT chat's long command and defeat independent parallel startup.
+  return exclusive(async () => {
     const source = assertControlSession(authority);
     const workspace = workspaceById(source.workspaceId);
     if (workspace.experience !== "advanced") {
@@ -2481,19 +2564,13 @@ export async function switchSessionTask(
     if (matches.length > 1) throw new Error(`TASK_TARGET_AMBIGUOUS: multiple open tasks named ${input.taskTitle}; specify task_id.`);
     const target = matches[0];
     if (!target) throw new Error("TASK_TARGET_NOT_FOUND: existing task not found in this chat's workspace; no task or workspace was created.");
-    if (target.id !== source.id && state.agentAssignments.some(item => item.taskId === target.id
-      && item.status === "queued" && Date.parse(item.expiresAt) > Date.now())) {
-      throw new Error("TASK_TARGET_RESERVED: this task is queued for another ChatGPT session; cancel its reservation before targeting it explicitly.");
-    }
-    const otherSession = state.agentBindings.some(binding => binding.taskId === target.id
-      && binding.sessionId !== sessionId && !binding.closedAt);
-    if (otherSession) throw new Error("TASK_TARGET_IN_USE: another chat is already bound to this task; use that chat or choose an unassigned task.");
+    // A binding selects work; it does not own the task. Other conversations
+    // and queued launch requests may use it too. Dispatch coordinates actual
+    // conflicting resources and applies the destination task's policy.
     const executionPath = taskExecutionPath(target);
-    if (state.agentBindings.some(binding => binding.sessionId !== sessionId && !binding.closedAt
-      && state.tasks.some(item => item.id === binding.taskId
-        && workspacePathKey(taskExecutionPath(item)) === workspacePathKey(executionPath)))) {
-      throw new Error("TASK_TARGET_SHARED_CHECKOUT: another chat uses the same checkout; choose an isolated worktree task.");
-    }
+    // Distinct task IDs may share the same checkout. Dispatch retains a lock on
+    // that execution path for the complete mutation (including shell and Git),
+    // while independent sessions can plan, read, and switch concurrently.
     if (!await fs.stat(executionPath).then(stat => stat.isDirectory()).catch(() => false)) {
       throw new Error("TASK_TARGET_WORKTREE_MISSING: task execution folder is unavailable; restore it before switching.");
     }
@@ -2505,8 +2582,13 @@ export async function switchSessionTask(
       binding.taskId = target.id;
       binding.clientType = clientType;
       binding.lastSeenAt = new Date().toISOString();
-      cancelAssignment(state, target.id);
       await save({ scopes: ["tasks"], taskId: target.id, reason: "session-switched-task" });
+    }
+    // Explicitly targeting even the currently selected task confirms that this
+    // particular MCP session belongs to it. Dashboard fallback alone never does.
+    if (!binding.taskConfirmed) {
+      binding.taskConfirmed = true;
+      await save({ scopes: ["tasks"], taskId: target.id, reason: "session-task-confirmed" });
     }
     return {
       authoritative: true,
@@ -2519,7 +2601,7 @@ export async function switchSessionTask(
       dashboard_selection_unchanged: true,
       message: "This chat was bound to the requested existing task. Other sessions and the dashboard selection were not changed.",
     };
-  }));
+  });
 }
 
 export async function setTaskDescription(id: string, description: string): Promise<Task> {
@@ -2563,6 +2645,124 @@ export async function setTaskHandoff(id: string, input: { summary: string; nextS
   // Dispatch already owns the workspace lock. Admin updates acquire that same
   // lock; neither path acquires the global queue while holding a workspace lock.
   return context ? update() : workspaceExclusive(id, update);
+}
+
+/** A task inbox is a durable mailbox, not a way to make the ChatGPT host execute another conversation. */
+export async function taskDispatchInbox(taskId: string, sessionId: string, messageId?: string, limit = 20) {
+  await init();
+  const source = taskById(taskId);
+  const binding = state.agentBindings.find(item => item.sessionId === sessionId && item.taskId === taskId && !item.closedAt);
+  if (!binding) throw new Error("TASK_DISPATCH_SESSION_CHANGED: this chat is no longer bound to the task");
+  const visible = (state.taskMessages || []).filter(message => message.workspaceId === source.workspaceId
+    && (message.sourceSessionId === sessionId || (message.targetTaskId === taskId
+      && (!message.targetSessionId || message.targetSessionId === sessionId
+        || (message.status === "queued" && !state.agentBindings.some(item => item.sessionId === message.targetSessionId && !item.closedAt && item.taskConfirmed !== false))))));
+  const matched = messageId ? visible.filter(message => message.id === messageId) : visible;
+  if (messageId && !matched.length) throw new Error("TASK_DISPATCH_NOT_FOUND: message is not visible to this conversation");
+  return {
+    task_id: taskId,
+    messages: structuredClone(matched.slice(-Math.min(Math.max(limit, 1), 30)).reverse().map(message => ({
+      ...message,
+      source_task_title: state.tasks.find(item => item.id === message.sourceTaskId)?.title,
+      target_task_title: state.tasks.find(item => item.id === message.targetTaskId)?.title,
+    }))),
+    total: matched.length,
+    execution: "Messages are persisted only. The destination ChatGPT conversation must call task_dispatch(action=claim), do the work with its own bound tools, then call action=complete or fail. The host does not auto-start another chat.",
+  };
+}
+
+export async function mutateTaskDispatch(input: {
+  taskId: string; sessionId: string; action: "send" | "claim" | "complete" | "fail" | "cancel";
+  targetTaskId?: string; targetTaskTitle?: string; messageId?: string; instruction?: string; result?: string;
+}) {
+  const context = executionContext.getStore();
+  const operation = context && state.operations.find(item => item.id === context.operationId);
+  if (!context || context.taskId !== input.taskId || context.sessionId !== input.sessionId
+    || operation?.taskId !== input.taskId || operation.tool !== "task_dispatch"
+    || operation.status !== "running" || operation.args.action !== input.action) {
+    throw new Error("TASK_DISPATCH_REQUIRED: use the current chat's authorized task_dispatch operation");
+  }
+  const source = taskById(input.taskId);
+  const binding = state.agentBindings.find(item => item.sessionId === input.sessionId
+    && item.taskId === input.taskId && !item.closedAt);
+  if (!binding) throw new Error("TASK_DISPATCH_SESSION_CHANGED: this chat is no longer bound to the task");
+  if (workspaceById(source.workspaceId).experience !== "advanced") throw new Error("ADVANCED_REQUIRED: task routing requires Advanced mode");
+  state.taskMessages ??= [];
+  const now = new Date().toISOString();
+  let message: TaskMessage;
+  if (input.action === "send") {
+    if (!input.targetTaskId && !input.targetTaskTitle?.trim()) throw new Error("TASK_DISPATCH_TARGET_REQUIRED: specify a task id or title");
+    if (!input.instruction?.trim()) throw new Error("TASK_DISPATCH_INSTRUCTION_REQUIRED: provide the work request");
+    const targets = state.tasks.filter(item => item.workspaceId === source.workspaceId && taskAcceptsWork(item)
+      && (!input.targetTaskId || item.id === input.targetTaskId)
+      && (!input.targetTaskTitle || item.title.trim().toLocaleLowerCase() === input.targetTaskTitle.trim().toLocaleLowerCase()));
+    if (targets.length > 1) throw new Error("TASK_DISPATCH_AMBIGUOUS: specify target_task_id");
+    const target = targets[0];
+    if (!target) throw new Error("TASK_DISPATCH_NOT_FOUND: no open task with that id/title in this workspace");
+    if (target.id === source.id) throw new Error("TASK_DISPATCH_SAME_TASK: work directly in this chat");
+    const owners = state.agentBindings.filter(item => item.taskId === target.id && !item.closedAt && item.taskConfirmed !== false);
+    if (state.taskMessages.filter(item => item.targetTaskId === target.id && item.status === "queued").length >= 100) {
+      throw new Error("TASK_DISPATCH_QUEUE_FULL: destination inbox already contains 100 pending requests");
+    }
+    message = {
+      id: randomUUID(), workspaceId: source.workspaceId, sourceTaskId: source.id, sourceSessionId: input.sessionId,
+      targetTaskId: target.id, ...(owners.length === 1 ? { targetSessionId: owners[0].sessionId } : {}),
+      instruction: input.instruction.trim(), createdAt: now, status: "queued",
+    };
+    state.taskMessages.push(message);
+    const terminal = state.taskMessages.filter(item => ["completed", "failed", "cancelled"].includes(item.status))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 250);
+    const retained = new Set(terminal.map(item => item.id));
+    state.taskMessages = state.taskMessages.filter(item => !["completed", "failed", "cancelled"].includes(item.status) || retained.has(item.id));
+  } else {
+    const id = input.messageId;
+    if (!id && input.action !== "claim") throw new Error("TASK_DISPATCH_ID_REQUIRED: specify message_id");
+    const candidates = state.taskMessages.filter(item => item.workspaceId === source.workspaceId
+      && (id ? item.id === id : item.targetTaskId === source.id && item.status === "queued"
+        && (!item.targetSessionId || item.targetSessionId === input.sessionId
+          || !state.agentBindings.some(binding => binding.sessionId === item.targetSessionId && !binding.closedAt && binding.taskConfirmed !== false))));
+    message = candidates[0]!;
+    if (!message) throw new Error("TASK_DISPATCH_NOT_FOUND: no matching request in this workspace");
+    if (input.action === "cancel") {
+      if (message.sourceSessionId !== input.sessionId || message.sourceTaskId !== source.id) throw new Error("TASK_DISPATCH_SENDER_REQUIRED: only the originating chat can cancel its request");
+      if (message.status !== "queued") throw new Error("TASK_DISPATCH_ALREADY_CLAIMED: only queued requests can be cancelled");
+      message.status = "cancelled";
+      message.finishedAt = now;
+    } else {
+      if (message.targetTaskId !== source.id) throw new Error("TASK_DISPATCH_OWNER_REQUIRED: claim and finish from the destination task's chat");
+      if (message.targetSessionId && message.targetSessionId !== input.sessionId) {
+        const formerOwner = state.agentBindings.find(item => item.sessionId === message.targetSessionId && !item.closedAt && item.taskConfirmed !== false);
+        if (formerOwner) throw new Error("TASK_DISPATCH_OWNER_REQUIRED: this request belongs to another active chat");
+      }
+      if (input.action === "claim") {
+        if (message.status !== "queued") throw new Error("TASK_DISPATCH_NOT_QUEUED: request is no longer available to claim");
+        if (state.taskMessages.some(item => item.targetTaskId === source.id && item.status === "claimed")) {
+          throw new Error("TASK_DISPATCH_BUSY: finish the task's claimed request before claiming another");
+        }
+        message.status = "claimed";
+        message.targetSessionId = input.sessionId;
+        message.claimedBySessionId = input.sessionId;
+        message.claimedAt = now;
+      } else {
+        if (message.status !== "claimed" || message.claimedBySessionId !== input.sessionId) {
+          throw new Error("TASK_DISPATCH_CLAIM_REQUIRED: only the chat that claimed the request can finish it");
+        }
+        if (!input.result?.trim()) throw new Error("TASK_DISPATCH_RESULT_REQUIRED: provide the actual outcome");
+        message.status = input.action === "complete" ? "completed" : "failed";
+        message.result = input.result.trim();
+        message.finishedAt = now;
+      }
+    }
+  }
+  await save({ scopes: ["tasks"], taskId: message.targetTaskId, reason: `task-dispatch-${input.action}` });
+  return {
+    message: structuredClone(message),
+    current_chat_unchanged: true,
+    destination_executed: false,
+    next_step: input.action === "send" ? "Destination chat must call task_dispatch(action=list), then claim and execute. No ChatGPT conversation has been auto-started."
+      : input.action === "claim" ? "Execute the instruction using this chat's own task tools, then report with action=complete or fail."
+      : "The originating chat can retrieve the status/result with task_dispatch(action=status, message_id=...).",
+  };
 }
 
 export async function setTaskPreview(id: string, preview?: TaskPreview): Promise<Task> {
@@ -2823,11 +3023,39 @@ export async function resolveSessionTask(sessionId: string, workspace: string, c
       sessionId,
       clientType,
       fallbackTaskId,
+      fallbackConfirmed: clientType !== "chatgpt" || workspaceById(taskById(fallbackTaskId).workspaceId).experience !== "advanced"
+        || state.tasks.filter(item => item.workspaceId === taskById(fallbackTaskId).workspaceId && taskAcceptsWork(item)).length <= 1,
       ...(clientType === "chatgpt" && state.selectedWorkspaceId ? { workspaceId: state.selectedWorkspaceId } : {}),
       taskExists,
     });
     await save({ scopes: ["workspaces", "tasks"], taskId: claimed.taskId, reason: "session-task-bound" });
     return claimed.taskId;
+  });
+}
+
+/** Persistent conversation routing. Transport reconnects must not select work. */
+export async function resolveConversationTask(sessionId: string, bootstrapTaskId: string): Promise<{ taskId: string; workspace: string }> {
+  return exclusive(async () => {
+    const existing = state.agentBindings.find(binding => binding.sessionId === sessionId);
+    if (existing) {
+      const task = taskById(existing.taskId);
+      if (!taskAcceptsWork(task)) throw new Error("AGENT_TASK_CLOSED: this conversation's task is closed; it was not rebound automatically");
+      existing.lastSeenAt = new Date().toISOString();
+      delete existing.closedAt;
+      return { taskId: task.id, workspace: taskExecutionPath(task) };
+    }
+    const task = taskById(bootstrapTaskId);
+    const workspace = workspaceById(task.workspaceId);
+    const now = new Date().toISOString();
+    state.agentBindings.push({
+      id: randomUUID(), agentId: randomUUID(), sessionId, taskId: task.id,
+      clientType: "chatgpt", createdAt: now, lastSeenAt: now,
+      // Initialization is discovery, not evidence of an intended task.
+      taskConfirmed: workspace.experience === "basic"
+        || state.tasks.filter(item => item.workspaceId === workspace.id && taskAcceptsWork(item)).length === 1,
+    });
+    await save({ scopes: ["tasks"], taskId: task.id, reason: "conversation-bound" });
+    return { taskId: task.id, workspace: taskExecutionPath(task) };
   });
 }
 
@@ -2838,9 +3066,6 @@ export async function queueAgentTaskAssignment(taskId: string): Promise<AgentAss
     await assertWorkspaceReady(workspace);
     if (workspace.experience === "basic") throw new Error("ADVANCED_REQUIRED: Basic conversations automatically use the project's default task.");
     if (!taskAcceptsWork(task)) throw new Error(`Task cannot accept a new agent while lifecycle is ${task.lifecycle}`);
-    if (task.execution.mode !== "worktree" || !task.execution.managed) {
-      throw new Error("AGENT_ASSIGNMENT_ISOLATION_REQUIRED: queueing another ChatGPT session requires a managed worktree task");
-    }
     const assignment = queueAssignment(state, task.id, task.workspaceId);
     await save({ scopes: ["tasks"], taskId: task.id, reason: "agent-assignment-queued" });
     return structuredClone(assignment);
@@ -3049,7 +3274,7 @@ export async function restoreTaskCheckpoint(id: string): Promise<CheckpointResto
 // Classification is conservative and independent of model-supplied annotations.
 const READ_TOOLS = new Set(["inspect_code", "read_text_file", "read_multiple_files", "list_directory", "glob", "grep", "search_files", "directory_tree", "get_file_info", "list_allowed_directories", "agent_status", "project_context", "skills", "load_path_rules", "shell_status", "process_status", "process_output", "mcp_servers", "mcp_tools"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch", "replace_regex", "create_directory", "copy_file", "move_file", "remember"]);
-const METADATA_TOOLS = new Set(["task_handoff"]);
+const METADATA_TOOLS = new Set(["task_handoff", "task_dispatch"]);
 const CHANGE_SET_IDLE_MS = Math.max(30_000, Number(process.env.WORKBENCH_REVIEW_RUN_IDLE_MS || process.env.WORKBENCH_CHANGE_SET_IDLE_MS || 5 * 60_000));
 const CHANGE_SET_MAX_MS = Math.max(CHANGE_SET_IDLE_MS, Number(process.env.WORKBENCH_REVIEW_RUN_MAX_MS || process.env.WORKBENCH_CHANGE_SET_MAX_MS || 30 * 60_000));
 
@@ -3154,6 +3379,7 @@ function touchChangeSet(op: Operation): void {
 export function isReadOperation(tool: string, args: Args): boolean {
   if (tool === "mcp_servers" && args.refresh === true) return false;
   return READ_TOOLS.has(tool) || ["git_status", "git_diff", "git_log"].includes(tool)
+    || (tool === "task_dispatch" && ["list", "status"].includes(args.action || "list"))
     || (tool === "task_handoff" && (args.action || "read") === "read")
     || tool === "github" && ["pr_list", "pr_view", "pr_checks", "issue_list", "issue_view"].includes(args.action)
     || (["git_branch", "git_stash"].includes(tool) && (args.action || "list") === "list")
@@ -3163,6 +3389,40 @@ export function isReadOperation(tool: string, args: Args): boolean {
 export function isProcessOperation(tool: string): boolean {
   return tool.startsWith("git_") || tool === "github" || ["run_command", "start_process", "mcp_call", "mcp_servers", "mcp_tools", "shell_reset"].includes(tool)
     || tool.startsWith("upstream_");
+}
+
+// Only single-file handlers with a fully known write set may use a narrow
+// resource lock. Multi-file patches, shell, Git, directory operations and
+// unknown/proxied tools retain the checkout-root lock. A shell working
+// directory is NOT a write boundary, so never infer its write set from cwd.
+const SINGLE_FILE_MUTATIONS = new Set([
+  "write_file", "write_file_base64", "edit_file", "multi_edit", "replace_regex",
+]);
+async function operationResourcePaths(taskId: string, tool: string, args: Args): Promise<string[]> {
+  const task = taskById(taskId);
+  const root = taskExecutionPath(task);
+  if (!SINGLE_FILE_MUTATIONS.has(tool) && !(tool === "apply_patch" && !isMultiFilePatch(args.patch || ""))) return [root];
+  if (typeof args.path !== "string" || !args.path.trim()) return [root];
+  const target = await executionContext.run({ taskId, workspace: root, workspaceOnly: task.policy.workspaceOnly,
+    operationId: "resource-preflight", capture: async () => {} }, () => validatePath(args.path));
+  // Full machine access can address files outside the task checkout. Keep a
+  // root lock as well in that case, because other agents may use other paths.
+  const rootKey = workspacePathKey(root), targetKey = workspacePathKey(target);
+  if (targetKey === rootKey || !targetKey.startsWith(`${rootKey}${path.sep}`)) return [root, target];
+  if (await fs.stat(target).then(stat => stat.isDirectory()).catch(() => false)) return [root];
+  return [target];
+}
+
+/** Fail closed if a session-scoped MCP server points at a stale task binding. */
+export async function assertSessionTaskBinding(sessionId: string, taskId: string, requireConfirmed = true): Promise<void> {
+  await init();
+  const binding = state.agentBindings.find(item => item.sessionId === sessionId && !item.closedAt);
+  if (!binding || binding.taskId !== taskId) {
+    throw new Error("SESSION_TASK_MISMATCH: this MCP session is not bound to the requested task. Stop; verify workbench_control(action=status) and explicitly assign the correct task before using tools.");
+  }
+  if (requireConfirmed && binding.taskConfirmed === false) {
+    throw new Error("SESSION_TASK_UNCONFIRMED: a new MCP transport cannot prove which ChatGPT window it belongs to. First call workbench_control(action=status), then explicitly target the intended task_id in THIS session. No project tools were executed.");
+  }
 }
 
 function operationRisk(tool: string, args: Args): PermissionRisk {
@@ -3234,7 +3494,7 @@ const SANDBOX_PROCESS_TOOLS = new Set([
 ]);
 const WORKSPACE_CONTROL_TOOLS = new Set(["shell_reset", "stop_process", "clear_processes", "rewind"]);
 const INTEGRATION_SAFE_CONTROL_TOOLS = new Set(["shell_reset", "stop_process", "clear_processes"]);
-const MISSING_WORKSPACE_SAFE_TOOLS = new Set(["process_status", "process_output", "stop_process", "clear_processes", "shell_reset", "task_handoff"]);
+const MISSING_WORKSPACE_SAFE_TOOLS = new Set(["process_status", "process_output", "stop_process", "clear_processes", "shell_reset", "task_handoff", "task_dispatch"]);
 async function assertWorkspaceOperationAllowed(tool: string): Promise<void> {
   if (WORKSPACE_CONTROL_TOOLS.has(tool)) return;
   if (!isProcessOperation(tool)) return;
@@ -3390,6 +3650,7 @@ async function captureTree(target: string, found: Map<string, Snapshot>): Promis
 }
 export async function dispatch(taskId: string, tool: string, args: Args, invoke: () => Promise<unknown>, human = false, sessionId?: string, environment?: Record<string, string>, reviewIdentity?: ReviewIdentity): Promise<any> {
   await init();
+  if (sessionId && !human) await assertSessionTaskBinding(sessionId, taskId);
   // The localhost Workbench UI is already a direct human-controlled surface.
   // Git actions from that UI must keep working even when a task is configured
   // workspace-only but no Docker sandbox is installed. This exception is
@@ -3398,6 +3659,7 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
   const humanGit = human && tool.startsWith("git_");
   // Waiting for process output must not lock writes or other tasks behind it.
   if (isReadOperation(tool, args)) {
+    if (sessionId && !human) await assertSessionTaskBinding(sessionId, taskId);
     const task = structuredClone(taskById(taskId));
     if (!MISSING_WORKSPACE_SAFE_TOOLS.has(tool)) await assertWorkspaceReady(workspaceById(task.workspaceId));
     const executionRoot = taskExecutionPath(task);
@@ -3407,7 +3669,8 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
     }
     return executionContext.run({ taskId, sessionId, workspace: executionRoot, workspaceOnly, operationId: randomUUID(), environment, capture: async () => {} }, invoke);
   }
-  return workspaceExclusive(taskId, async () => {
+  return workspacePathsExclusive(await operationResourcePaths(taskId, tool, args), async () => {
+    if (sessionId && !human) await assertSessionTaskBinding(sessionId, taskId);
     const task = taskById(taskId);
     if (!MISSING_WORKSPACE_SAFE_TOOLS.has(tool)) await assertWorkspaceReady(workspaceById(task.workspaceId));
     if (!INTEGRATION_SAFE_CONTROL_TOOLS.has(tool)) assertTaskMutable(task);
@@ -3459,6 +3722,7 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
       await save({ scopes: ["operations"], taskId, operationId: op.id, reason: "operation-running" });
       let result: any;
       try {
+        if (sessionId && !human) await assertSessionTaskBinding(sessionId, taskId);
         if (!INTEGRATION_SAFE_CONTROL_TOOLS.has(tool)) assertTaskMutable(task);
         if (!human) await assertBasicWriter(task, sessionId);
         if (handoffBefore !== undefined && JSON.stringify(task.handoff ?? null) !== handoffBefore) {
@@ -3509,7 +3773,7 @@ export async function decideOperation(id: string, approve: boolean): Promise<unk
   const existing = state.operations.find(o => o.id === id);
   if (!existing) throw new Error("Unknown operation");
   const taskId = existing.taskId;
-  return workspaceExclusive(taskId, async () => {
+  return workspacePathsExclusive(await operationResourcePaths(taskId, existing.tool, existing.args), async () => {
     const op = state.operations.find(o => o.id === id);
     if (!op) throw new Error("Unknown operation");
     // A repeated *same* decision is idempotent, but terminal approvals that were

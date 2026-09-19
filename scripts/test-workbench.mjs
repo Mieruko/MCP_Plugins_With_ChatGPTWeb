@@ -230,7 +230,7 @@ try {
   assert.match(workbenchHtml, /id="chat-sessions-button"/, 'advanced Workbench exposes the multi-chat entry point');
   assert.match(workbenchHtml, /id="chat-sessions-dialog"/, 'multi-chat workflow has a dedicated dialog');
   assert.match(workbenchHtml, /data-chat-layout="4"/, 'multi-chat workflow includes a four-pane layout preset');
-  assert.match(workbenchHtml, /No model API\. Prompts stay local until you copy them\./, 'multi-chat workflow explicitly remains ChatGPT Web only');
+  assert.match(workbenchHtml, /No model API\. Prompts stay local until copied\./, 'multi-chat workflow explicitly remains ChatGPT Web only');
   const workbenchCssResponse = await fetch(admin + '/ui/workbench-app.css');
   assert.equal(workbenchCssResponse.status, 200);
   const workbenchCss = await workbenchCssResponse.text();
@@ -613,11 +613,9 @@ try {
   workspaceState = await adminRequest('/api/workbench');
   assert.equal(workspaceState.selectedWorkspaceId, secondWorkspaceRecord.id);
   assert.equal(workspaceState.selectedTaskId, undefined, 'selecting an empty workspace does not invent a dashboard task');
-  assert.match(
-    JSON.stringify(await adminRequest(`/api/workbench/tasks/${task.id}/assignment`, {}, 'POST', 400)),
-    /AGENT_ASSIGNMENT_ISOLATION_REQUIRED/,
-    'a second ChatGPT session cannot be queued onto the shared local checkout',
-  );
+  const sharedAssignment = await adminRequest(`/api/workbench/tasks/${task.id}/assignment`, {}, 'POST');
+  assert.equal(sharedAssignment.taskId, task.id, 'an existing local task can reserve its own ChatGPT session');
+  await adminRequest(`/api/workbench/tasks/${task.id}/assignment`, {}, 'DELETE');
 
   const cloneSource = path.join(tmp, 'clone-source');
   await fs.mkdir(cloneSource);
@@ -1226,7 +1224,45 @@ try {
   await policy(isolatedTask.id, 'full', false);
   await policy(conflictTask.id, 'full', false);
   await policy(backendTask.id, 'full', false);
-  const sessionTimedCommand = (file, waitMs) => `node -e "const fs=require('fs');const f='${file}';const v={start:Date.now()};fs.writeFileSync(f,JSON.stringify(v));setTimeout(()=>{v.end=Date.now();fs.writeFileSync(f,JSON.stringify(v));},${waitMs})"`;
+  const routed = payload(await callWithSession(assignmentSid, 'task_dispatch', {
+    action: 'send', target_task_id: conflictTask.id, instruction: 'Run the frontend regression suite on your own branch.',
+  }));
+  assert.equal(routed.message.status, 'queued');
+  assert.equal(routed.destination_executed, false, 'dispatch never pretends to wake a different ChatGPT conversation');
+  assert.equal(routed.current_chat_unchanged, true);
+  assert.equal(payload(await callWithSession(conflictSid, 'task_dispatch', { action: 'list' }))
+    .messages.some(message => message.id === routed.message.id), true, 'destination chat sees the same-workspace request');
+  assert.equal((await callWithSession(backendSid, 'task_dispatch', { action: 'status', message_id: routed.message.id })).isError, true,
+    'a third chat cannot inspect another chat pair\'s private message');
+  const accepted = payload(await callWithSession(conflictSid, 'task_dispatch', { action: 'claim', message_id: routed.message.id }));
+  assert.equal(accepted.message.claimedBySessionId, conflictSid);
+  const acknowledged = payload(await callWithSession(conflictSid, 'task_dispatch', {
+    action: 'complete', message_id: routed.message.id, result: 'Frontend regression suite succeeded.',
+  }));
+  assert.equal(acknowledged.message.status, 'completed');
+  assert.equal(payload(await callWithSession(assignmentSid, 'task_dispatch', {
+    action: 'status', message_id: routed.message.id,
+  })).messages[0].result, 'Frontend regression suite succeeded.');
+  assert.equal(payload(await callWithSession(assignmentSid, 'workbench')).task.id, isolatedTask.id);
+  assert.equal(payload(await callWithSession(conflictSid, 'workbench')).task.id, conflictTask.id);
+  console.log('OK MCP cross-chat task dispatch preserves session ownership and routes owner-claimed results');
+  const sessionTimedCommand = (file, waitMs) => {
+    // Hold each job until every peer has started. Cold Windows shells can take
+    // longer than the old 500ms window; a barrier tests concurrency directly.
+    const peers = (file.startsWith('four-') ? [
+      [isolatedTask.execution.path, 'four-agent-a.json'], [conflictTask.execution.path, 'four-agent-b.json'],
+      [dataTask.execution.path, 'four-agent-c.json'], [testerTask.execution.path, 'four-agent-d.json'],
+    ] : [
+      [isolatedTask.execution.path, 'agent-session-a.json'], [conflictTask.execution.path, 'agent-session-b.json'],
+      [backendTask.execution.path, 'agent-session-c.json'],
+    ]).map(([root, name]) => path.join(root, name));
+    const code = `const fs=require('fs');const f=${JSON.stringify(file)};const peers=${JSON.stringify(peers)};
+      const v={start:Date.now()};fs.writeFileSync(f,JSON.stringify(v));
+      const timer=setInterval(()=>{if(peers.every(p=>fs.existsSync(p))){clearInterval(timer);
+        setTimeout(()=>{v.end=Date.now();fs.writeFileSync(f,JSON.stringify(v));},${waitMs});
+      }else if(Date.now()-v.start>6000){clearInterval(timer);process.exitCode=9;}},20);`;
+    return `node -e "eval(Buffer.from('${Buffer.from(code).toString('base64')}','base64').toString())"`;
+  };
   await Promise.all([
     callWithSession(assignmentSid, 'run_command', { command: sessionTimedCommand('agent-session-a.json', 500) }),
     callWithSession(conflictSid, 'run_command', { command: sessionTimedCommand('agent-session-b.json', 500) }),
@@ -1280,8 +1316,9 @@ try {
   assert.ok(available.available_tasks.some(item => item.id === testerTask.id && item.in_use_by_other_chat));
   const selectionBeforeSwitch = (await adminRequest('/api/workbench')).selectedTaskId;
   const occupied = await call('workbench_control', { action: 'target', task_title: 'Tester', create_missing: false });
-  assert.equal(occupied.isError, true);
-  assert.match(text(occupied), /TASK_TARGET_IN_USE/);
+  assert.equal(payload(occupied).task.id, testerTask.id);
+  assert.equal(payload(await callWithSession(testerSid, 'workbench')).task.id, testerTask.id);
+  await call('workbench_control', { action: 'target', task_id: backendTask.id, create_missing: false });
   const foreign = await call('workbench_control', { action: 'target', task_title: 'Second project', create_missing: false });
   assert.equal(foreign.isError, true);
   assert.match(text(foreign), /TASK_TARGET_NOT_FOUND/);
@@ -1289,8 +1326,8 @@ try {
   assert.equal(ambiguous.isError, true);
   assert.match(text(ambiguous), /TASK_TARGET_AMBIGUOUS/);
   const reserved = await call('workbench_control', { action: 'target', task_title: 'Kết nối data', create_missing: false });
-  assert.equal(reserved.isError, true);
-  assert.match(text(reserved), /TASK_TARGET_RESERVED/, 'a chat cannot silently steal another session\'s queued lease');
+  assert.equal(payload(reserved).task.id, dataTask.id, 'a reservation does not prevent explicit task selection');
+  await call('workbench_control', { action: 'target', task_id: backendTask.id, create_missing: false });
   await adminRequest(`/api/workbench/tasks/${dataTask.id}/assignment`, {}, 'DELETE');
   assert.equal(payload(await call('workbench')).task.id, backendTask.id, 'failed task switches do not change the binding');
 

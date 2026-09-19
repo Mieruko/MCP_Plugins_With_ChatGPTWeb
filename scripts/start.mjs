@@ -337,6 +337,10 @@ const server = spawn(process.execPath, [path.join(root, "dist", "index.js")], {
 });
 relayRuntimeOutput(server.stdout, process.stdout, "server:stdout");
 relayRuntimeOutput(server.stderr, process.stderr, "server:stderr");
+let serverStderrTail = "";
+server.stderr?.on("data", chunk => {
+  serverStderrTail = (serverStderrTail + chunk.toString()).slice(-8_000);
+});
 
 let repairingOpenAiTunnel = false;
 async function repairOpenAiTunnel(reason) {
@@ -391,7 +395,9 @@ let startupComplete = false;
 server.once("exit", code => {
   stopTree(tunnelChild);
   if (!startupComplete) {
-    console.error(`\nWorkbench server stopped before startup completed. See ${runtimeLogPath}\n`);
+    const reason = [...serverStderrTail.matchAll(/^Error:\s+(.+)$/gm)].at(-1)?.[1]?.trim();
+    if (reason) console.error(`\nWorkbench server could not start: ${reason}`);
+    console.error(`See ${runtimeLogPath}\n`);
   }
   runtimeLog.end();
   process.exit(code ?? 0);

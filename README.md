@@ -1,12 +1,12 @@
 <div align="center">
 
-# MCP Plugins With ChatGPT Web · v1.0.0
+# MCP Plugins With ChatGPT Web · V1.0.1
 
 **A self-hosted local coding Workbench that connects ChatGPT Web to your machine through MCP.**
 
 **Start with Basic — the recommended experience for everyday coding.**
 
-[Download v1.0.0](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/releases/tag/v1.0.0) · [Release notes](docs/releases/v1.0.0.md)
+[Download V1.0.1](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/releases/tag/v1.0.1) · [Release notes](docs/releases/v1.0.1.md)
 
 Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Diff · Checkpoints · Upstream MCP
 
@@ -16,7 +16,7 @@ Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Di
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Mieruko/MCP_Plugins_With_ChatGPTWeb?style=flat-square&logo=github)](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/stargazers)
 
-[Quick Start](#quick-start) · [Workbench](#workbench) · [ChatGPT](#connect-chatgpt) · [GitHub](#github-integration) · [Security](#permissions-and-security) · [Upstream](#upstream-and-project-history)
+[Quick Start](#quick-start) · [Recommended tunnel setup](#option-2-setup) · [Workbench](#workbench) · [ChatGPT](#connect-chatgpt) · [GitHub](#github-integration) · [Security](#permissions-and-security) · [Upstream](#upstream-and-project-history)
 
 </div>
 
@@ -96,8 +96,9 @@ Clone **this fork**:
 ```powershell
 git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
 cd MCP_Plugins_With_ChatGPTWeb
-git checkout v1.0.0
+git checkout v1.0.1
 npm ci
+npm run setup
 npm start
 ```
 
@@ -105,9 +106,9 @@ npm start
 
 The first-run wizard asks for the workspace and one connection mode:
 
-- **Cloudflare Quick Tunnel** — easiest setup; the wizard can install `cloudflared` automatically. Use ChatGPT **Server URL + OAuth**. The public URL changes each run.
-- **OpenAI Secure MCP Tunnel** — stable tunnel identity. The wizard installs `tunnel-client`, asks for Tunnel ID / Runtime API key / optional organization ID, and validates basic tunnel access. The Runtime key needs **Tunnels Read + Use**. Use ChatGPT **Tunnel + No Auth**.
-- **Local only** — Workbench/MCP stay local and no public tunnel is started.
+- **1 — Cloudflare Quick Tunnel** — quick setup; the wizard can install `cloudflared` automatically. Use ChatGPT **Server URL + OAuth**. The public URL changes each run.
+- **2 — OpenAI Secure MCP Tunnel · Recommended / Khuyên dùng (Windows)** — stable tunnel identity. The wizard installs `tunnel-client`, asks for Tunnel ID / Runtime API key / optional organization ID, and validates basic tunnel access. The Runtime key needs **Tunnels Read + Use**. Use ChatGPT **Tunnel + No Auth**. Follow the [complete option 2 guide](#option-2-setup) below.
+- **3 — Local only** — Workbench/MCP stay local and no public tunnel is started.
 
 The wizard creates/updates `.env` for you. Reconfigure at any time with:
 
@@ -141,6 +142,114 @@ Workbench:   http://127.0.0.1:3001/ui/workbench.html
 ```
 
 If a default port is already in use, the launcher automatically selects a nearby free port. You can still set `PORT` and `ADMIN_PORT` to choose preferred starting ports.
+
+<a id="option-2-setup"></a>
+
+### Option 2 — OpenAI Secure MCP Tunnel (Recommended / Khuyên dùng)
+
+This is the recommended connection for Windows users with access to OpenAI tunnels. You keep the same Tunnel ID between launches. The option 2 installer in this repository currently requires **Windows and PowerShell**; use option 1 or 3 on other operating systems.
+
+#### 1. Prepare the machine and OpenAI access
+
+Install Node.js 22+ (including npm) and Git, then open a new PowerShell terminal and check:
+
+```powershell
+node --version
+npm --version
+git --version
+```
+
+Docker and GitHub CLI are optional; neither is required to install this tunnel connection.
+
+You need access to ChatGPT developer mode and the target Platform organization's tunnel permissions. Creating a tunnel requires **Tunnels Read + Manage**; running the client and selecting the tunnel require **Tunnels Read + Use**. These are separate from developer-mode access. Associate the tunnel with the **ChatGPT workspace where you will use it**, as well as its owning Platform organization. If either permission is missing, ask the respective workspace or organization administrator. See the [official OpenAI tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#permissions-and-access).
+
+#### 2. Create the tunnel and its Runtime API key
+
+1. Open [Platform → Organization → Tunnels](https://platform.openai.com/settings/organization/tunnels) and select the correct organization.
+2. Create a tunnel, give it a recognizable name such as `Codex Local`, and associate the intended ChatGPT workspace. Copy its **Tunnel ID** (`tunnel_` followed by 32 hexadecimal characters).
+3. Open [Organization API keys](https://platform.openai.com/settings/organization/api-keys), create a Runtime API key with **Tunnels Read + Use** access, and keep the key for the setup prompt. A key without tunnel access will not work.
+4. Note the owning **Organization ID** (`org_...`) if your account requires explicit organization selection.
+
+Keep the Runtime key private. Enter it only into the local setup prompt; the wizard masks input and stores it in the ignored `.env` file.
+
+#### 3. Install this release and run the wizard
+
+For a new installation:
+
+```powershell
+git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
+cd MCP_Plugins_With_ChatGPTWeb
+git checkout v1.0.1
+npm ci
+npm run setup
+```
+
+Answer the prompts as follows:
+
+| Wizard prompt | What to enter |
+| --- | --- |
+| `Tunnel [...]` | Type **`2`** and press Enter. The bracketed default may reflect an earlier setup; explicitly choose 2. |
+| `Workspace [...]` | Absolute path to the project ChatGPT should work on, for example `D:\projects\my-app`. Press Enter only if the displayed folder is correct. |
+| Open tunnel + Runtime API key settings? | Enter `y` to open the two settings pages, or press Enter if you already have the values. |
+| `Tunnel ID` | Paste the ID copied in step 2. |
+| Reuse the Runtime API key? | Appears when a key is already saved. Press Enter to keep it, or enter `n` to replace it. |
+| `Runtime API key (hidden)` | Paste the Runtime key. Its characters are masked. |
+| `Organization ID (optional)` | Paste the owning `org_...` when needed; otherwise leave blank on a fresh installation. |
+| Save configuration anyway? | Appears only if validation fails. Choose `n`, correct the reported access issue, then run setup again. |
+| Open Workbench automatically? | Press Enter to accept `Y` on a fresh installation. |
+
+The wizard installs `bin/tunnel-client.exe`, validates tunnel metadata access, and saves the configuration to `.env`. `Tunnel metadata access OK.` checks **Read** access; actual **Use** access is checked when the tunnel runs. `npm run setup` finishes after configuration; start the service in the next step.
+
+#### 4. Start Workbench and the tunnel
+
+```powershell
+npm start
+```
+
+The launcher builds the project when needed, starts the MCP server and local Workbench, generates the tunnel profile, and starts `tunnel-client`. Keep this terminal open while using ChatGPT. You do not need a second terminal running `openai-tunnel.bat`.
+
+Workbench opens automatically with local browser authentication. Use the addresses printed in the terminal: defaults are MCP `http://localhost:3000` and Workbench `http://127.0.0.1:3001/ui/workbench.html`, but occupied ports are adjusted automatically. Detailed launcher output is saved in `.runtime-logs/npm-start.log`.
+
+#### 5. Connect from ChatGPT
+
+Enable developer mode for the intended ChatGPT workspace, then open its Plugins/Apps area and create an app in developer mode. Choose **Connection: Tunnel** and select the tunnel or enter its `tunnel_id`. The tunnel client must stay running for discovery and tool calls. If the tunnel is absent, verify workspace association and your Read + Use permissions. See [OpenAI's ChatGPT connection steps](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#connect-from-chatgpt).
+
+For **this repository's launcher**, select **Authentication: None / No Auth**. The generated local profile supplies the MCP Bearer token on the private connection to the server. Do not paste the tunnel service URL into a normal Server URL/OAuth connection.
+
+Save the app, enable it in a new ChatGPT conversation, and ask:
+
+```text
+Call workbench and show the current workspace, task and permissions.
+```
+
+Confirm that the workspace path matches the project chosen in setup before asking for edits. New tasks start with Ask and workspace-only permissions. Choose **Advanced** in Workbench when you need multiple tasks running in parallel; each conversation can target an existing task in that workspace independently of the task selected on the Dashboard.
+
+#### 6. Daily use, repairs and upgrades
+
+- Next time, run **`npm start`** from this repository. Saved setup values are reused.
+- Press **Ctrl+C** in that terminal to stop the launcher and its child processes.
+- Run **`npm run setup`** to change the workspace or connection mode, or **`npm run repair:tunnel`** to repair tunnel settings while preserving workspace/UI settings.
+- For a manual repair while the launcher is running, stop it first, run the repair command, then start it again. The launcher's automatic repair prompt can restart only the tunnel client.
+- After upgrading server/tool definitions, refresh the ChatGPT app/connector and start a new conversation.
+
+| Symptom | Resolution |
+| --- | --- |
+| `tunnel_use_forbidden` | Replace or update the Runtime key to grant Tunnels Read + Use for this tunnel, using `npm run repair:tunnel`. A successful metadata check alone does not prove Use access. |
+| `tunnel_active_organization_required` | Use the repair flow to set the owning `org_...`; it is saved as `CONTROL_PLANE_ORGANIZATION_ID`. |
+| Tunnel metadata validation fails | Check the copied Tunnel ID, Runtime key, owning organization and access permissions; rerun setup after correcting them. |
+| Missing or damaged `tunnel-client` | `npm start` attempts to repair the local binary. Check internet/download access if that repair fails. |
+| ChatGPT cannot discover tools | Keep `npm start` running, check the terminal/runtime log for tunnel errors, and verify Connection: Tunnel with Authentication: None. |
+| Workbench page requires authentication | Use the page opened by the launcher. If `OPEN_UI=0`, re-enable automatic opening through setup before the next launch. |
+
+For an existing checkout, preserve `.env`, back up the configured `WORKBENCH_PATH`, and stop its running launcher before upgrading. Commit or otherwise preserve local source edits first; do not force checkout over them:
+
+```powershell
+git fetch origin --tags
+git checkout v1.0.1
+npm ci
+npm run build
+npm start
+```
 
 ### Important environment settings
 
@@ -189,6 +298,24 @@ A **Workspace** represents a local project directory. A workspace may exist befo
 A **Task** represents a unit of work inside one workspace and carries its own permission policy and operation history.
 
 New MCP sessions bind to the currently selected task. Existing sessions remain pinned to the task they started with, so switching the selected workspace/task does not silently move an already-running ChatGPT session into another project.
+
+#### Independent parallel ChatGPT windows (Advanced)
+
+Open **Chats** in Workbench, choose one existing task for each window, and select the 1–4 window layout. The launcher permits multiple conversations on an existing task, including tasks with active chats or pending launch assignments. Distinct tasks may share a checkout: the launcher warns instead of blocking them. Each card has its own local draft and a **Copy prompt** action containing the exact workspace/task IDs and a verified `workbench_control(action=target, task_id=..., create_missing=false)` instruction. Paste that prompt into **that window**, let it target and verify its own session/task, then send the task instructions. Do not use `task_dispatch` for assigning a task to the chat in which you are typing.
+
+ChatGPT tool calls carrying `_meta["openai/session"]` use a persistent conversation binding, separate from the MCP transport. Reconnecting, sharing a transport, restarting the server or selecting a different Dashboard task does not move a bound conversation. A new conversation explicitly selects its intended task in a multi-task workspace. Clients without conversation metadata retain explicit transport-scoped selection; they must select again on a new transport. Once a transport uses conversation metadata, missing metadata is rejected rather than silently falling back. Opening a launcher window alone does not assign work. Same-workspace selection works under Ask, including an explicit matching workspace ID, and does not wait behind another chat's busy checkout. Run `npm run test:routing` for real HTTP reconnect, restart, shared-transport concurrency and approval tests.
+
+Mutating MCP operations on distinct worktrees overlap. On the **same checkout**, independently targeted single-file MCP edits can overlap; same-file edits are serialized. Shell, Git, multi-file/unknown writes, Undo and other checkout-wide mutations retain a root lock because their write sets cannot safely be inferred. A long `run_command` holds that lock until it finishes; prefer `start_process` for a genuinely background test, which releases its launch lock after starting. Running processes can still modify files/databases after launch, so coordinate these manually. Both tasks see uncommitted edits: check stale changes, agree on file ownership, and never reset, restore, stash, clean or commit another task's work. Shared Docker containers, preview ports and test databases also require coordination or isolation. This workflow does not auto-start ChatGPT turns, create tasks without permission, merge, discard or push files.
+
+Run `npm run test:parallel` to validate provisional/confirmed session routing, parallel writes to three distinct files in one checkout, same-file/root conflicts, and work continuing after a background process starts. Existing saved worktrees and uncommitted changes are not migrated or deleted by this launcher.
+
+#### Same-workspace task dispatch (Advanced)
+
+From a ChatGPT conversation already bound to one task, you can request work for a different task in the **same** Advanced workspace: `@Coder task Tester: PostgreSQL is ready; run integration tests.` The agent selects Tester with `workbench_control(action=target, task_title="Tester", create_missing=false)`, loads `project_context`, and performs the work in the current conversation under Tester's policy. Other conversations keep running their tasks. Use `task_dispatch(action=send, ...)` only when explicitly asking to send a message to another chat; it queues work without executing it.
+
+When the **Tester conversation receives its next user turn**, it can call `task_dispatch(action=list)`, then `action=claim`, perform the work with its existing task-scoped tools, and report the actual result via `action=complete` or `action=fail`. The sending conversation can read the result with `action=status` and the message ID. One request per destination task can be claimed at a time; additional requests remain queued. Cross-workspace requests, non-owner claims and premature completions are rejected. Dispatch mutations respect the sending or receiving task's normal Ask/Auto/Full policy, including approval when required.
+
+**Host limitation:** This is a durable task mailbox and owner-driven execution, **not** autonomous cross-chat execution. A self-hosted MCP tool cannot create a ChatGPT turn, wake an idle ChatGPT Web tab, type into another conversation, or post the owner's model reply into the ChatGPT UI. Sending a message only means it was queued. The owner must resume its conversation to claim and run it. After updating the server, restart it and refresh the ChatGPT connector/start new conversations to discover `task_dispatch`; do not restart the MCP server during active calls.
 
 The Workbench currently provides:
 
@@ -337,7 +464,7 @@ WORKBENCH_REMOTE_POLICY_CONTROL=true
 
 After restarting the server and refreshing the connector's tool definitions, say **“Bật Full quyền cho task này”**. The agent reads the current policy revision and calls `workbench_control(action=set_policy, mode=full, workspace_only=false, expected_revision=...)`. Say **“Tắt Full, hỏi trước khi sửa”** to return to Ask with workspace-only scope. Auto is also supported. Set the installation option back to `false` to disable conversational policy changes.
 
-This opt-in authorizes authenticated MCP conversations to change their bound task's policy. It does not grant another conversation the Basic writer lease. Policy changes are recorded in history and expire existing pending approvals without executing them. Full does not automatically carry over when targeting another project. Workspace/task creation and retargeting require Full with machine scope on the source task; running processes and preview leases must be stopped before a retarget releases its writer.
+This opt-in authorizes authenticated MCP conversations to change their bound task's policy. It does not grant another conversation the Basic writer lease. Policy changes are recorded in history and expire existing pending approvals without executing them. Full does not automatically carry over when targeting another project. Workspace/task creation and switching to another workspace require Full with machine scope on the source task. Selecting an existing task in the same Advanced workspace does not require Full. Resolve pending approvals and stop running processes/previews before retargeting.
 
 Workbench has no content filter that prohibits application account creation, credentials, or password seed files. Full allows the normal file/command tools to perform user-authorized setup. Client/connector review is independent: report its actual error if it rejects a request before it reaches this server. Changing Workbench permissions cannot disable that separate layer.
 

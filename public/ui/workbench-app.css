@@ -168,8 +168,8 @@ body[data-experience="basic"] .topbar {
 .review-center-recent-file code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cbd2d9; font-size: var(--text-xs); }
 .review-center-recent-file .additions { color: var(--green); font-size: var(--text-xs); }
 .review-center-recent-file .deletions { color: #ff7b72; font-size: var(--text-xs); }
-.left-rail { display: grid; grid-template-rows: auto auto minmax(0,1fr); }
-.rail-section { min-height: 0; }
+.left-rail { display: grid; grid-template-columns: minmax(0,1fr); grid-template-rows: auto auto minmax(0,1fr); }
+.rail-section { min-width: 0; min-height: 0; }
 .environment-section { border-bottom: 1px solid var(--border); background: #090909; }
 .environment-head { height: 44px; }
 .environment-head strong { color: #c0c6ce; font-size: var(--text-xs); letter-spacing: .08em; }
@@ -844,6 +844,10 @@ button.environment-stat:disabled { cursor: default; }
 .chat-slot-meta { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
 .chat-slot-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-slot-meta span:first-child { font-family: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace; color: #9fb2c7; }
+.chat-slot-task-label { display: grid; gap: 5px; color: var(--muted); font-size: var(--text-xs); }
+.chat-slot-task-select { width: 100%; min-width: 0; background: var(--surface-2); color: var(--text); padding: 8px; border: 1px solid var(--border); border-radius: 7px; }
+.chat-slot-safety { margin: 0; padding: 7px 9px; border-radius: 6px; background: #0e1720; color: #a4c5e4; font-size: var(--text-xs); line-height: 1.45; }
+.chat-slot-safety.attention { background: #271d0d; color: #f2c574; border: 1px solid #674b22; }
 .chat-slot-prompt { width: 100%; min-height: 112px; resize: vertical; padding: 10px 11px; border: 1px solid #2a3038; border-radius: 7px; outline: 0; background: #07090c; color: #d8dee5; font: var(--text-sm)/1.55 Inter, "Segoe UI", sans-serif; }
 .chat-slot-prompt:focus { border-color: #456b96; }
 .chat-slot-prompt::placeholder { color: #555e68; }
@@ -853,10 +857,10 @@ button.environment-stat:disabled { cursor: default; }
 .chat-window-status { margin: 0; padding: 9px 10px; border: 1px solid var(--border-soft); border-radius: 7px; background: #0b0e12; color: var(--muted); font-size: var(--text-xs); line-height: 1.45; }
 .chat-window-status.attention { border-color: #654c26; background: #171207; color: #e2b766; }
 .task-brief-section { border-bottom: 1px solid var(--border); background: #0a0a0a; }
-.task-brief-body { display: grid; gap: 9px; padding: 0 12px 12px; }
-.task-description { margin: 0; max-height: 74px; overflow: auto; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
-.task-handoff-card { border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: rgba(255,255,255,.02); }
-.task-handoff-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.task-brief-body { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr); gap: 9px; padding: 0 12px 12px; }
+.task-description { margin: 0; max-height: 74px; overflow: auto; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.task-handoff-card { min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: rgba(255,255,255,.02); }
+.task-handoff-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; margin-bottom: 6px; }
 .task-handoff-head strong { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .task-handoff-head small { color: var(--muted); font-size: 10px; }
 .task-handoff-card p { margin: 0; max-height: 66px; overflow: auto; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }

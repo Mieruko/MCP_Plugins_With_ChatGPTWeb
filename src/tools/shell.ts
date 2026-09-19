@@ -229,6 +229,7 @@ export function registerShellTools(server: McpServer, defaultCwd: string, timeou
       if (item.taskId) {
         registerTaskRuntimeProcess({
           taskId: item.taskId,
+          ...(executionContext.getStore()?.sessionId ? { sessionId: executionContext.getStore()!.sessionId } : {}),
           id: item.id,
           ...(child.pid === undefined ? {} : { pid: child.pid }),
           command: item.command,
