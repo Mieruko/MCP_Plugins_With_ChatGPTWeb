@@ -1,3 +1,4 @@
+import { COMPUTER_TOOLS, computerEnabled } from "./computer-use.js";
 export type ToolProfileName = "full" | "slim";
 
 /** Core tools for ChatGPT web — smaller tools/list payload, fewer discovery errors. */
@@ -49,6 +50,7 @@ export function getChatGptToolProfile(): ToolProfileName {
 }
 
 export function shouldExposeTool(name: string, profile: ToolProfileName = getChatGptToolProfile()): boolean {
+  if (COMPUTER_TOOLS.has(name)) return computerEnabled();
   if (profile === "full") return true;
   return SLIM_CHATGPT_TOOLS.has(name);
 }

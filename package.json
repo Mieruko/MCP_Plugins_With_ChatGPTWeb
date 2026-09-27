@@ -18,7 +18,10 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node scripts/test-state-ownership.mjs && node scripts/test-sandbox.mjs && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-auto-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-skills.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-continuity.mjs && node scripts/test-handoff-expiry.mjs && node scripts/test-control-permissions.mjs && node scripts/test-task-dispatch.mjs && node scripts/test-parallel-sessions.mjs && node scripts/test-conversation-routing.mjs && node scripts/test-workbench.mjs && node scripts/test-experience.mjs",
+    "test": "npm run build && node scripts/test-state-ownership.mjs && node scripts/test-sandbox.mjs && node scripts/test-patch.mjs && node scripts/test-tools.mjs && node scripts/test-checkpoints.mjs && node scripts/test-upstream-results.mjs && node scripts/test-mcp-upstream.mjs && node scripts/test-activity-log.mjs && node scripts/test-project-memory.mjs && node scripts/test-auto-memory.mjs && node scripts/test-tool-profile.mjs && node scripts/test-skills.mjs && node scripts/test-shell-persist.mjs && node scripts/test-chatgpt-web.mjs && node scripts/test-continuity.mjs && node scripts/test-handoff-expiry.mjs && node scripts/test-control-permissions.mjs && node scripts/test-task-dispatch.mjs && node scripts/test-parallel-sessions.mjs && node scripts/test-conversation-routing.mjs && node scripts/test-workbench.mjs && node scripts/test-experience.mjs",
+    "test:multimodal": "npm run build && node scripts/test-upstream-results.mjs && node scripts/test-mcp-bridge-integration.mjs",
+    "test:computer": "npm run build && node scripts/test-computer-use.mjs && node scripts/test-computer-faults.mjs && node scripts/test-computer-performance.mjs",
+    "test:computer:windows": "npm run build && node scripts/test-computer-windows.mjs",
     "test:dispatch": "npm run build && node scripts/test-task-dispatch.mjs",
     "test:routing": "npm run build && node scripts/test-conversation-routing.mjs",
     "test:parallel": "npm run build && node scripts/test-parallel-sessions.mjs",
@@ -65,5 +68,8 @@
     "@types/node": "^22.13.4",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
+  },
+  "optionalDependencies": {
+    "@playwright/mcp": "0.0.82"
   }
 }

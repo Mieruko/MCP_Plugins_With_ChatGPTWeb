@@ -11,6 +11,21 @@ const sessions = {};
 
 function buildServer() {
   const mcpServer = new McpServer({ name: "mock-http-mcp", version: "1.0.0" });
+  let observationCalls = 0;
+  mcpServer.registerTool('observation', {
+    description: 'Synthetic multimodal fixture; never captures a real screen',
+    inputSchema: { fail: z.boolean().optional(), image_only: z.boolean().optional(), oversized: z.boolean().optional() },
+  }, async ({ fail, image_only, oversized }) => {
+    observationCalls++;
+    return {
+    content: [
+      ...(!image_only ? [{ type: 'text', text: oversized ? 'x'.repeat(150000) : 'Synthetic observation' }] : []),
+      { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' },
+    ],
+    ...(!image_only ? { structuredContent: { state: fail ? 'failed' : 'ready', calls: observationCalls } } : {}),
+    isError: fail === true,
+    };
+  });
   mcpServer.registerTool(
     "add",
     {

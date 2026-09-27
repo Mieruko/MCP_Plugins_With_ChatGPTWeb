@@ -12,6 +12,8 @@ import { getSandboxStatus } from "./os-sandbox.js";
 import { getTaskRuntime, setTaskRuntimeProcessRole, stopTaskRuntimeProcesses } from "./task-runtime.js";
 import { defaultExperience, type ExperienceMode, type WriterLease } from "./experience.js";
 import { isLoopbackPortAvailable, selectPreviewPort, waitForLoopbackPortAvailable, type PortLease } from "./port-leases.js";
+import { operationMediaCache, type OperationMedia } from "./operation-media.js";
+import { COMPUTER_TOOLS, revokeComputerTask, computerSessionSummaries } from "./computer-use.js";
 import {
   cancelAgentAssignment as cancelAssignment,
   claimSessionTask,
@@ -235,6 +237,7 @@ export interface Operation {
   id: string; taskId: string; sessionId?: string; changeSetId?: string; reviewRunId?: string; tool: string; args: Args; createdAt: string; expiresAt: number;
   policyRevision: number; status: "pending" | "running" | "completed" | "failed" | "denied" | "expired" | "interrupted";
   changes: Change[]; error?: string; result?: unknown;
+  media?: OperationMedia;
   review?: OperationReview;
   permission?: PermissionDecision;
   tracking: "file-tools" | "task-metadata" | "external-effects-not-tracked";
@@ -769,6 +772,9 @@ function assertControlSession(authority: ControlAuthority): Task {
 }
 
 function assertControlIdle(task: Task, sessionId: string): void {
+  if (computerSessionSummaries().some(session => session.task_id === task.id && session.owner === sessionId)) {
+    throw new Error("CONTROL_BUSY: close this conversation's Computer Use session before switching tasks.");
+  }
   if (state.operations.some(op => op.sessionId === sessionId && ["pending", "running"].includes(op.status))) {
     throw new Error("AGENT_TARGET_BUSY: resolve pending or running operations before changing task.");
   }
@@ -1433,6 +1439,7 @@ export async function completeTask(taskId: string): Promise<TaskFinalizationResu
 
     const completedAt = new Date().toISOString();
     task.lifecycle = "completed";
+    revokeComputerTask(task.id);
     task.completedAt ??= completedAt;
     cancelAssignment(state, task.id);
     const workspace = workspaceById(task.workspaceId);
@@ -1487,6 +1494,7 @@ export async function finishTaskIntegration(taskId: string): Promise<TaskFinaliz
     const current = taskById(taskId);
     if (current.lifecycle !== "merged" && current.lifecycle !== "completed") throw new Error(`TASK_FINISH_STATE: task cannot finish from ${current.lifecycle}`);
     current.lifecycle = "completed";
+    revokeComputerTask(current.id);
     current.completedAt ??= new Date().toISOString();
     current.integration ??= {};
     current.integration.finishedAt ??= new Date().toISOString();
@@ -1522,6 +1530,7 @@ export async function discardTaskIntegration(taskId: string): Promise<TaskFinali
     interruptPendingTaskOperations(task, "Task was discarded before this operation was approved.");
     cancelAssignment(state, task.id);
     task.lifecycle = "archived";
+    revokeComputerTask(task.id);
     task.integration ??= {};
     task.integration.discardedAt ??= new Date().toISOString();
     selectFallbackAfterTaskClose(task);
@@ -1565,6 +1574,7 @@ export async function markTaskReadyForMerge(taskId: string): Promise<TaskIntegra
       return (await inspectTaskIntegration(task, true)).view;
     }
     task.lifecycle = "ready_to_merge";
+    revokeComputerTask(task.id);
     task.integration.readyAt = new Date().toISOString();
     task.integration.readySourceHead = inspection.view.sourceHead;
     task.integration.readyTargetHead = inspection.view.targetHead;
@@ -1808,7 +1818,10 @@ export async function setWorkspaceExperience(workspaceId: string, mode: Experien
         if (state.selectedWorkspaceId === workspace.id) state.selectedTaskId = task.id;
       }
       // The approved experience change must not replay stale coordination decisions.
-      for (const task of tasks) interruptPendingTaskOperations(task, "Experience changed; request this operation again.");
+      for (const task of tasks) {
+        interruptPendingTaskOperations(task, "Experience changed; request this operation again.");
+        revokeComputerTask(task.id);
+      }
       workspace.experience = mode;
       delete workspace.writer;
       await save({ scopes: ["state"], reason: "experience-changed" });
@@ -1830,6 +1843,7 @@ export async function takeWorkspaceWriter(workspaceId: string, sessionId: string
       const view = experienceView(workspace, sessions);
       if (view.runningProcesses || view.previewLeased) throw new Error("WRITER_BUSY: stop the project's managed processes and preview before transferring control.");
       interruptPendingTaskOperations(task, "Write control was transferred. Request this operation again from the current writer.");
+      revokeComputerTask(task.id);
       workspace.writer = { sessionId, acquiredAt: new Date().toISOString() };
       await save({ scopes: ["tasks", "operations"], taskId: task.id, reason: "writer-transferred" });
       return experienceView(workspace, sessions);
@@ -3110,6 +3124,7 @@ export async function setTaskPolicy(id: string, mode: PermissionMode, workspaceO
 }
 
 function updateTaskPolicy(task: Task, mode: PermissionMode, workspaceOnly: boolean): void {
+  revokeComputerTask(task.id);
   task.policy = { mode, workspaceOnly, revision: task.policy.revision + 1 };
   for (const op of state.operations.filter(o => o.taskId === task.id && o.status === "pending")) {
     op.status = "expired"; callbacks.delete(op.id);
@@ -3387,7 +3402,7 @@ export function isReadOperation(tool: string, args: Args): boolean {
     || (tool === "rewind" && ["list", "preview", "status"].includes(args.action));
 }
 export function isProcessOperation(tool: string): boolean {
-  return tool.startsWith("git_") || tool === "github" || ["run_command", "start_process", "mcp_call", "mcp_servers", "mcp_tools", "shell_reset"].includes(tool)
+  return COMPUTER_TOOLS.has(tool) || tool.startsWith("git_") || tool === "github" || ["run_command", "start_process", "mcp_call", "mcp_servers", "mcp_tools", "shell_reset"].includes(tool)
     || tool.startsWith("upstream_");
 }
 
@@ -3436,6 +3451,7 @@ function operationRisk(tool: string, args: Args): PermissionRisk {
 
 function operationEffects(tool: string, args: Args): PermissionEffect[] {
   const effects = new Set<PermissionEffect>();
+  if (COMPUTER_TOOLS.has(tool)) { effects.add("external"); effects.add("process"); effects.add("network"); }
   if (EDIT_TOOLS.has(tool) || ["delete_file", "delete_directory"].includes(tool)) effects.add("files");
   if (METADATA_TOOLS.has(tool)) effects.add("task_metadata");
   if (WORKSPACE_CONTROL_TOOLS.has(tool) || tool === "workbench_control") effects.add("workspace_control");
@@ -3748,7 +3764,9 @@ export async function dispatch(taskId: string, tool: string, args: Args, invoke:
             .filter(c => fingerprint(c.before) !== fingerprint(c.after));
           if (op.tracking === "file-tools") op.review = buildCompletedOperationReview(op.changes);
         } catch (error) { op.status = "failed"; op.error = `Tracking incomplete: ${error}`; }
-        op.result = result;
+        const stored = operationMediaCache.store(taskId, op.id, result);
+        op.result = stored.result;
+        op.media = stored.media;
         touchChangeSet(op);
         await save({ scopes: ["operations", "workspace"], taskId, operationId: op.id, reason: "operation-finished" });
       }

@@ -1,3 +1,5 @@
+import type { ContentBlock, TextContent } from "@modelcontextprotocol/sdk/types.js";
+
 /**
  * Chuẩn output JSON cho mọi tool — ChatGPT dễ parse.
  *
@@ -15,10 +17,11 @@ export interface ToolResultPayload<T = Record<string, unknown>> {
 export function toolResult<T extends object>(
   tool: string,
   data: T,
-  options?: { ok?: boolean; summary?: string }
+  options?: { ok?: boolean; summary?: string; content?: ContentBlock[]; isError?: boolean }
 ): {
-  content: Array<{ type: "text"; text: string }>;
+  content: [TextContent, ...ContentBlock[]];
   structuredContent: Record<string, unknown>;
+  isError?: boolean;
 } {
   const payload: ToolResultPayload = {
     ok: options?.ok ?? true,
@@ -28,8 +31,9 @@ export function toolResult<T extends object>(
   };
 
   return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }, ...(options?.content ?? [])],
     structuredContent: payload,
+    ...(options?.isError === undefined ? {} : { isError: options.isError }),
   };
 }
 

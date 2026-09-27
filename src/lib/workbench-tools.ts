@@ -27,6 +27,8 @@ import {
 import { executionContext, mcpPrincipalContext } from "./workbench-context.js";
 import { validatePath } from "./path-security.js";
 import { updateConversationActivity, withConversationActivity } from "./conversation-activity.js";
+import { operationMediaCache } from "./operation-media.js";
+import { audit } from "./audit.js";
 
 const SUMMARY_ATTENTION_LIMIT = 8;
 const HANDOFF_EXCERPT_CHARS = 700;
@@ -156,27 +158,63 @@ export function installWorkbench(
       () => requestScope.run(scope, () => handler(structuredClone(immutable), extra)),
       false, session(), undefined, reviewIdentity(extra));
   })) as typeof server.registerTool;
+  const bindingStatus = async (expectedTaskId?: string) => {
+    const taskId = await task(false);
+    const snapshot = await getWorkbench();
+    const currentTask = snapshot.tasks.find(item => item.id === taskId);
+    const currentWorkspace = currentTask ? snapshot.workspaces.find(item => item.id === currentTask.workspaceId) : undefined;
+    if (!currentTask || !currentWorkspace) throw new Error("Current Workbench binding no longer exists");
+    const binding = snapshot.agentBindings.find(item => item.sessionId === session());
+    const confirmed = Boolean(session() && binding && binding.taskConfirmed !== false);
+    const matches = expectedTaskId === taskId && confirmed;
+    await audit({ tool: "workbench", action: "binding_status", status: expectedTaskId && !matches ? "blocked" : "ok",
+      details: { current_task_id: taskId, expected_task_id: expectedTaskId, task_confirmed: confirmed,
+        matched: expectedTaskId ? matches : undefined } });
+    return { ...(expectedTaskId && !matches ? { isError: true } : {}), content: [{ type: "text" as const, text: JSON.stringify({
+      authoritative: true, server_received_at: new Date().toISOString(),
+      workspace: { id: currentWorkspace.id, name: currentWorkspace.name, path: currentWorkspace.path, experience: currentWorkspace.experience },
+      task: { id: currentTask.id, title: currentTask.title, lifecycle: currentTask.lifecycle, kind: currentTask.kind, execution_path: taskExecutionPath(currentTask), branch: currentTask.execution.branch || null },
+      session: { id: session() || null, client_type: clientType, task_confirmed: confirmed },
+      policy: currentTask.policy, remote_policy_control: snapshot.capabilities.remotePolicyControl,
+      ...(expectedTaskId ? { verification: { expected_task_id: expectedTaskId, matches,
+        code: taskId !== expectedTaskId ? "TASK_MISMATCH" : !confirmed ? "TASK_UNCONFIRMED" : "TASK_VERIFIED",
+        next_step: matches ? "Read task_handoff/project_context and continue under the existing policy; no target call needed."
+          : "Stop project work. Explicit task assignment is required in an authorized interactive run; do not use the dashboard fallback." } } : {}),
+    }) }] };
+  };
   original("workbench", {
     title: "Task workbench",
-    description: "Read this conversation's pinned task and tasks within its workspace. For explicit assignment of THIS conversation to a different task use workbench_control(action=target, task_id=exact ID, create_missing=false), then status verification and project_context. Only for messages explicitly sent TO ANOTHER CHAT use task_dispatch(action=send). Never work on a dashboard fallback task instead of the assigned task or resubmit pending approvals.",
+    description: "Read the pinned task. Use view=status, expected_task_id=<ID> for read-only verification, including scheduled continuation. If verification.matches=true, no target call is needed; load handoff/context and continue under current policy. Mismatch/unconfirmed is an error: do not work on a fallback. Only an authorized explicit assignment may use workbench_control(action=target,create_missing=false). Client safety denial must be reported, never retried through other tools. summary/history/children and operation_id inspect current task progress.",
     inputSchema: {
       operation_id: z.string().optional(),
-      view: z.enum(["summary", "history", "children"]).default("summary"),
+      view: z.enum(["summary", "history", "children", "status"]).default("summary"),
+      expected_task_id: z.string().uuid().optional().describe("With view=status only: verify the current confirmed binding without switching task or changing policy."),
       limit: z.number().int().min(1).max(30).default(10),
       cursor: z.string().optional(),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, async ({ operation_id, view, limit, cursor }: { operation_id?: string; view: "summary" | "history" | "children"; limit: number; cursor?: string }) => {
+  }, async ({ operation_id, view, expected_task_id, limit, cursor }: { operation_id?: string; view: "summary" | "history" | "children" | "status"; expected_task_id?: string; limit: number; cursor?: string }) => {
+    if (expected_task_id && view !== "status") throw new Error("expected_task_id requires view=status; it never selects a task");
+    if (view === "status") {
+      if (operation_id || cursor) throw new Error("view=status cannot read operation results or history cursors");
+      return bindingStatus(expected_task_id);
+    }
     const taskId = await task(false);
     if (operation_id) {
       const op = await operationDetail(operation_id);
       if (op.taskId !== taskId) throw new Error("Operation belongs to another task");
       const current = (await getWorkbench()).tasks.find(t => t.id === taskId)!;
-      if (current.policy.workspaceOnly && !["file-tools", "task-metadata"].includes(op.tracking)) throw new Error("Operation output unavailable under current workspace-only policy");
+      if (current.policy.workspaceOnly && (op.media || !["file-tools", "task-metadata"].includes(op.tracking))) throw new Error("Operation output unavailable under current workspace-only policy");
       await executionContext.run({ taskId, sessionId: session(), workspace: taskExecutionPath(current), workspaceOnly: current.policy.workspaceOnly, operationId: op.id, capture: async () => {} }, async () => {
         for (const change of op.changes) await validatePath(change.path);
       });
-      return { content: [{ type: "text", text: JSON.stringify({ id: op.id, status: op.status, error: op.error, result: op.result }) }] };
+      const media = op.media ? operationMediaCache.read(taskId, op.id) : [];
+      return { content: [{ type: "text", text: JSON.stringify({ id: op.id, status: op.status, error: op.error, result: op.result,
+        ...(op.media ? { media: { ...op.media, available: media.length > 0,
+          observation_is_historical: true,
+          message: media.length ? "Recorded observation from execution time. Observe again before acting on UI."
+            : "Observation expired, was evicted, or the server restarted. Capture a new observation; do not resubmit the original action." } } : {}),
+      }) }, ...media] };
     }
     const data = await getWorkbench();
     const current = data.tasks.find(t => t.id === taskId)!;
@@ -271,7 +309,7 @@ export function installWorkbench(
   });
   original("workbench_control", {
     title: "Workbench control plane",
-    description: "Control Workbench on explicit request. To SWITCH THIS CHAT to an EXISTING task (an explicit assignment of this conversation to a task, including one used by another chat) within the SAME Advanced workspace, use action=target, task_id=<exact ID>, create_missing=false. Verify action=status and refresh project_context before coding; this does not select the dashboard task, move other chats, or require Full. If user explicitly wants to SEND instructions to ANOTHER CHAT while keeping its own binding, use task_dispatch instead. Cross-workspace targeting and task/workspace creation require Full machine scope; set_policy needs owner-enabled remote policy control and current revision.",
+    description: "Control Workbench on explicit request. Use read-only workbench(view=status) for status checks; this combined control tool can mutate state. To SWITCH THIS CHAT to an EXISTING task (an explicit assignment of this conversation to a task, including one used by another chat) within the SAME Advanced workspace, use action=target, task_id=<exact ID>, create_missing=false. Verify with read-only workbench(view=status,expected_task_id=<exact ID>) and refresh project_context before coding; this does not select the dashboard task, move other chats, or require Full. If user explicitly wants to SEND instructions to ANOTHER CHAT while keeping its own binding, use task_dispatch instead. Cross-workspace targeting and task/workspace creation require Full machine scope; set_policy needs owner-enabled remote policy control and current revision.",
     inputSchema: {
       action: z.enum(["status", "set_policy", "create_workspace", "create_task", "target"]),
       mode: z.enum(["ask", "auto", "full"]).optional(),
@@ -305,21 +343,7 @@ export function installWorkbench(
       workspacePath: args.workspace_path,
     };
 
-    if (args.action === "status") {
-      const taskId = await task(false);
-      const snapshot = await getWorkbench();
-      const currentTask = snapshot.tasks.find(item => item.id === taskId);
-      const currentWorkspace = currentTask ? snapshot.workspaces.find(item => item.id === currentTask.workspaceId) : undefined;
-      if (!currentTask || !currentWorkspace) throw new Error("Current Workbench binding no longer exists");
-      return { content: [{ type: "text", text: JSON.stringify({
-        authoritative: true,
-        workspace: { id: currentWorkspace.id, name: currentWorkspace.name, path: currentWorkspace.path, experience: currentWorkspace.experience },
-        task: { id: currentTask.id, title: currentTask.title, lifecycle: currentTask.lifecycle, kind: currentTask.kind, execution_path: taskExecutionPath(currentTask), branch: currentTask.execution.branch || null },
-        session: { id: session() || null, client_type: clientType,
-          task_confirmed: session() ? snapshot.agentBindings.find(item => item.sessionId === session())?.taskConfirmed !== false : true },
-        policy: currentTask.policy, remote_policy_control: snapshot.capabilities.remotePolicyControl,
-      }) }] };
-    }
+    if (args.action === "status") return bindingStatus();
 
     const currentSessionId = session();
     if (!currentSessionId) throw new Error("AGENT_TARGET_SESSION_REQUIRED: current MCP session is unavailable");

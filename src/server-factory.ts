@@ -14,6 +14,7 @@ import { refreshProxiedTools } from "./lib/mcp-tool-proxy.js";
 import { getChatGptToolProfile, shouldExposeTool } from "./lib/tool-profile.js";
 import { installWorkbench } from "./lib/workbench-tools.js";
 import { registerGithubTools } from "./tools/github.js";
+import { registerComputerTools } from "./tools/computer-use.js";
 
 const NOOP_TOOL = {
   remove: () => {},
@@ -97,6 +98,7 @@ export function createMcpServer(
   registerContextTools(server, workspaceRoot);
   registerSkillsTool(server);
   registerRewindTools(server);
+  registerComputerTools(server);
 
   if (upstreamManager) {
     registerMcpBridgeTools(server, upstreamManager);

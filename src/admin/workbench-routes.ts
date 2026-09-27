@@ -14,6 +14,9 @@ import { executeGithub, githubSchema } from "../tools/github.js";
 import { getOAuthProvider } from "../lib/oauth-provider.js";
 import { getTaskRuntime, stopTaskRuntimeProcesses } from "../lib/task-runtime.js";
 import { getWorkspaceExperience, listWorkspaceChangeSets, listWorkspaceReviewRuns, setWorkspaceExperience, takeWorkspaceWriter } from "../lib/workbench.js";
+import { computerEnabled, computerSessionSummaries, closeComputerSession, openComputerSession, computerProfilePath } from "../lib/computer-use.js";
+import { listComputerJobs } from "../lib/computer-jobs.js";
+import { executionContext } from "../lib/workbench-context.js";
 
 export function createWorkbenchRouter(options: { sessionList?: () => McpSessionSummary[] } = {}): Router {
   const router = Router();
@@ -72,6 +75,35 @@ export function createWorkbenchRouter(options: { sessionList?: () => McpSessionS
     catch (error) { res.status(400).json({ ok: false, error: String(error) }); }
   };
   router.get("/api/workbench", route(() => getWorkbench(options.sessionList?.() || [])));
+  router.get("/api/workbench/computer", route(async () => {
+    const jobs = [];
+    if (computerEnabled()) for (const task of (await getWorkbench()).tasks.slice(0, 50)) {
+      const listed = await executionContext.run({ taskId: task.id, sessionId: "local-owner", workspace: taskExecutionPath(task),
+        workspaceOnly: false, operationId: "computer-dashboard-read", capture: async () => {} }, listComputerJobs);
+      jobs.push(...listed.map(job => ({ ...job, task_id: task.id })));
+    }
+    return { enabled: computerEnabled(), windows_enabled: process.env.COMPUTER_WINDOWS_ENABLED === "true",
+      profiles: (await getWorkbench()).tasks.filter(task => ["open", "blocked", "ready_to_merge"].includes(task.lifecycle)).map(task => ({ task_id: task.id,
+        title: task.title, workspace_id: task.workspaceId, path: computerProfilePath(task.id) })),
+      sessions: computerSessionSummaries(), jobs: jobs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 50) };
+  }));
+  router.post("/api/workbench/computer/setup", route(async req => {
+    const { task_id } = z.object({ task_id: z.string().uuid() }).strict().parse(req.body);
+    const found = await task(task_id);
+    if (found.policy.workspaceOnly) throw new Error("WORKSPACE_EXTERNAL_BLOCKED: browser setup requires machine scope on this task");
+    // A deliberate local owner action, under the same task process/scope checks.
+    // No conversation binding or writer is reassigned to grant setup access.
+    return dispatch(found.id, "computer_session", { action: "open", backend: "browser" }, () => {
+      const context = executionContext.getStore()!;
+      return executionContext.run({ ...context, sessionId: `local-browser-setup:${found.id}` },
+        () => openComputerSession("browser", undefined, true));
+    }, true);
+  }));
+  router.post("/api/workbench/computer/sessions/:id/stop", route(async req => {
+    const id = z.string().uuid().parse(req.params.id);
+    await closeComputerSession(id);
+    return { stopped: true, note: "Control stopped; remote notebook execution may continue." };
+  }));
   router.get("/api/workbench/agents", route(() => getAgentCoordinator(options.sessionList?.() || [])));
   router.get("/api/workbench/integration", route(req => getIntegrationQueue(typeof req.query.workspaceId === "string" ? req.query.workspaceId : undefined)));
   router.get("/api/workbench/folders", route(async req => {

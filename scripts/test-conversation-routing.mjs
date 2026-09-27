@@ -181,7 +181,41 @@ try {
   const restarted = await init();
   for (let i = 0; i < tasks.length; i++) {
     assert.equal((await call(restarted, conversations[i], 'workbench')).task.id, tasks[i].id);
+    const before = await admin('/api/workbench');
+    const status = await call(restarted, conversations[i], 'workbench', { view: 'status', expected_task_id: tasks[i].id });
+    assert.equal(status.verification.matches, true);
+    assert.equal(status.session.task_confirmed, true);
+    assert.ok(status.server_received_at);
+    const mismatch = await raw(restarted, conversations[i], 'workbench', { view: 'status', expected_task_id: tasks[(i + 1) % tasks.length].id });
+    assert.equal(mismatch.isError, true);
+    assert.match(text(mismatch), /TASK_MISMATCH/);
+    const after = await admin('/api/workbench');
+    assert.equal(after.selectedTaskId, before.selectedTaskId);
+    assert.deepEqual(after.tasks.map(t => [t.id, t.policy]), before.tasks.map(t => [t.id, t.policy]));
+    assert.equal((await call(restarted, conversations[i], 'workbench', { view: 'status' })).task.id, tasks[i].id);
   }
+  const catalog = (await rpc(restarted, 'tools/list', {})).data.result.tools;
+  assert.equal(catalog.find(t => t.name === 'workbench').annotations.readOnlyHint, true);
+  assert.equal(catalog.find(t => t.name === 'workbench_control').annotations.readOnlyHint, false);
+  assert.ok((await fs.readFile(path.join(tmp, 'audit.log'), 'utf8')).includes('binding_status'));
+  // A fresh Scheduled conversation must not inherit a multi-task dashboard fallback as verified.
+  await admin(`/api/workbench/tasks/${tasks[0].id}/select`, {});
+  const freshTransport = await init();
+  const unconfirmed = await raw(freshTransport, 'scheduled-fresh-conversation', 'workbench', {
+    view: 'status', expected_task_id: tasks[0].id,
+  });
+  assert.equal(unconfirmed.isError, true);
+  const unconfirmedStatus = JSON.parse(text(unconfirmed));
+  assert.equal(unconfirmedStatus.verification.code, 'TASK_UNCONFIRMED');
+  assert.equal(unconfirmedStatus.session.task_confirmed, false);
+  assert.equal(unconfirmedStatus.policy.mode, 'ask');
+  assert.equal(unconfirmedStatus.policy.workspaceOnly, true);
+  const deniedRead = await raw(freshTransport, 'scheduled-fresh-conversation', 'read_text_file', { path: 'marker.txt' });
+  assert.equal(deniedRead.isError, true, 'verification must not confirm a fallback or unlock source reads');
+  const invalidView = await raw(restarted, conversations[0], 'workbench', { expected_task_id: tasks[0].id });
+  assert.equal(invalidView.isError, true, 'expected task is verification-only, not a selector for summary');
+  console.log('OK scheduled read-only binding verification after restart: mismatches fail without retarget or policy changes; control annotations remain mutating');
+  console.log('OK fresh scheduled conversation remains unconfirmed under Ask/workspace-only; verification does not unlock project reads');
   console.log('OK conversation bindings survive server restart without following Dashboard selection');
 } catch (error) {
   console.error(logs.slice(-7000)); throw error;

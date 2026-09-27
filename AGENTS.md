@@ -20,6 +20,8 @@ MCP server local giống Codex: đọc/ghi file, chạy lệnh, git. Dùng với
 4. Chỉ gọi `workbench(view=history)` khi cần lịch sử; history phân trang mặc định 10, tối đa 30. Dùng `workbench(operation_id=...)` để đọc kết quả của đúng approval đã gửi, không gửi lại request pending.
 5. `remember` lưu vào `.local-coder/MEMORY.md` của execution root đang được task pin. Khi file dài, initialization ưu tiên ghi chú mới nhất và báo khi lịch sử cũ bị lược khỏi context; lịch sử trên đĩa không bị xóa.
 
+Khi tiếp tục task đã có ID, kể cả Scheduled, xác minh trước bằng `workbench(view=status, expected_task_id=<ID>)`. Chỉ tiếp tục khi `verification.matches=true`; khi đó không cần gọi lại `target`. Sai task hoặc binding chưa xác nhận thì dừng việc project, chờ gắn task trong lượt tương tác được cho phép. Nếu client từ chối qua safety checks, báo đúng lớp lỗi và dừng việc phụ thuộc; không thử tool khác để vượt từ chối. Xem [Scheduled troubleshooting](docs/scheduled-mcp-troubleshooting.md).
+
 File Undo/Redo không khôi phục handoff metadata, thao tác shell/remote hoặc mọi side effect ngoài file journal. Workbench không tự mở chat mới, không tăng quota/context của ChatGPT và không tự ép một chat khác tiếp tục công việc.
 
 ## Quyền truy cập

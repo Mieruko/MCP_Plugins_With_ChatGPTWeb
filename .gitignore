@@ -3,6 +3,7 @@ dist/
 .mcp-audit.log
 .mcp-checkpoints/
 .tool-test-tmp/
+.computer-use-runtime/
 bin/
 profiles/*
 !profiles/mcp-upstream.json

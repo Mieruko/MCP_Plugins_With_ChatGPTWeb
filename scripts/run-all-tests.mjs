@@ -60,6 +60,7 @@ const unitScripts = [
   "scripts/test-patch.mjs",
   "scripts/test-tools.mjs",
   "scripts/test-checkpoints.mjs",
+  "scripts/test-upstream-results.mjs",
   "scripts/test-activity-log.mjs",
   "scripts/test-project-memory.mjs",
   "scripts/test-auto-memory.mjs",

@@ -31,7 +31,8 @@ try {
   const prompt = assignmentPrompt(tasks[1], workspace, 'Run real DB integration tests.');
   assert.match(prompt, /workbench_control\(action=target, task_id=the Task ID above, create_missing=false\)/);
   assert.match(prompt, /Task ID: B/);
-  assert.match(prompt, /verify the returned task ID matches exactly/);
+  assert.match(prompt, /workbench\(view=status, expected_task_id=the Task ID above\)/);
+  assert.match(prompt, /require verification\.matches=true/);
   assert.doesNotMatch(prompt, /task_dispatch\(/);
   assert.throws(() => assignmentPrompt({ ...tasks[1], workspaceId: 'foreign' }, workspace), /not in the selected workspace/);
   console.log('OK browser slots permit shared checkouts with warnings, allow shared tasks and generate exact-ID prompts');

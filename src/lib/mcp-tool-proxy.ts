@@ -6,7 +6,7 @@ import type { RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpUpstreamManager } from "./mcp-upstream-manager.js";
 import type { UpstreamServerConfig } from "./mcp-upstream-config.js";
 import { toolAnnotations } from "./tool-annotations.js";
-import { toolResult } from "./tool-result.js";
+import { upstreamToolResult } from "./upstream-result.js";
 
 const proxyRegistry = new WeakMap<McpServer, Map<string, RegisteredTool>>();
 
@@ -85,12 +85,10 @@ export async function refreshProxiedTools(server: McpServer, manager: McpUpstrea
         },
         async (args: Record<string, unknown>) => {
           const raw = await manager.callTool(config.id, tool.name, args ?? {});
-          const content = formatUpstreamResult(raw);
-          return toolResult(proxyName, {
+          return upstreamToolResult(proxyName, raw, {
             upstream_server: config.id,
             upstream_tool: tool.name,
-            result: content,
-          });
+          }, "result");
         }
       );
       registry.set(proxyName, registered);
@@ -105,21 +103,6 @@ export async function refreshProxiedTools(server: McpServer, manager: McpUpstrea
   }
 
   return [...activeNames];
-}
-
-function formatUpstreamResult(raw: unknown): unknown {
-  if (!raw || typeof raw !== "object") return raw;
-  const obj = raw as { content?: unknown; structuredContent?: unknown; isError?: boolean };
-  if (obj.structuredContent) return obj.structuredContent;
-  if (Array.isArray(obj.content)) {
-    return obj.content
-      .map((c) => {
-        if (c && typeof c === "object" && "text" in c) return (c as { text: string }).text;
-        return c;
-      })
-      .join("\n");
-  }
-  return raw;
 }
 
 export function clearProxiedTools(server: McpServer): void {

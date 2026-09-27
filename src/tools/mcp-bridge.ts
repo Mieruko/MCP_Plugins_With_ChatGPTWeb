@@ -4,6 +4,7 @@ import type { McpUpstreamManager } from "../lib/mcp-upstream-manager.js";
 import { audit } from "../lib/audit.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { toolResult } from "../lib/tool-result.js";
+import { upstreamToolResult } from "../lib/upstream-result.js";
 
 export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamManager): void {
   server.registerTool(
@@ -74,48 +75,14 @@ export function registerMcpBridgeTools(server: McpServer, manager: McpUpstreamMa
       if (!config.enabled) throw new Error(`Upstream server disabled: ${server_id}`);
 
       const raw = await manager.callTool(server_id, tool, args ?? {});
-      const payload = normalizeCallResult(raw);
+      const result = upstreamToolResult("mcp_call", raw, { server_id, tool });
       await audit({
         tool: "mcp_call",
         action: "call",
         target: `${server_id}:${tool}`,
-        status: payload.ok ? "ok" : "error",
+        status: result.isError ? "error" : "ok",
       });
-      return toolResult(
-        "mcp_call",
-        {
-          server_id,
-          tool,
-          ...payload.data,
-        },
-        { ok: payload.ok, summary: payload.summary }
-      );
+      return result;
     }
   );
-}
-
-function normalizeCallResult(raw: unknown): { ok: boolean; summary: string; data: Record<string, unknown> } {
-  if (!raw || typeof raw !== "object") {
-    return { ok: true, summary: "mcp_call: done", data: { output: raw } };
-  }
-
-  const obj = raw as {
-    isError?: boolean;
-    content?: Array<{ type?: string; text?: string }>;
-    structuredContent?: Record<string, unknown>;
-  };
-
-  if (obj.isError) {
-    const text = Array.isArray(obj.content)
-      ? obj.content.map((c) => c.text ?? "").join("\n")
-      : "upstream tool error";
-    return { ok: false, summary: text, data: { error: text, content: obj.content } };
-  }
-
-  if (obj.structuredContent) {
-    return { ok: true, summary: "mcp_call: ok", data: { output: obj.structuredContent, content: obj.content } };
-  }
-
-  const text = Array.isArray(obj.content) ? obj.content.map((c) => c.text ?? "").join("\n") : "";
-  return { ok: true, summary: text ? text.slice(0, 120) : "mcp_call: ok", data: { output: text, content: obj.content } };
 }

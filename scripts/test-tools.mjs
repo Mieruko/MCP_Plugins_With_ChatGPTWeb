@@ -34,8 +34,13 @@ async function run(name, fn) {
 await fs.mkdir(tmpDir, { recursive: true });
 
 await run("glob finds typescript files", async () => {
-  const matches = await globFiles(root, "src/**/*.ts", 50);
+  const fixture = await fs.mkdtemp(path.join(tmpDir, "glob-"));
+  await fs.mkdir(path.join(fixture, "src", "tools"), { recursive: true });
+  await fs.writeFile(path.join(fixture, "src", "tools", "filesystem.ts"), "export {};\n");
+  await fs.writeFile(path.join(fixture, "src", "ignore.txt"), "not TypeScript");
+  const matches = await globFiles(fixture, "src/**/*.ts", 50);
   if (!matches.some((m) => m.path.endsWith("filesystem.ts"))) throw new Error("filesystem.ts not found");
+  if (matches.length !== 1) throw new Error("glob included unrelated files");
 });
 
 await run("grep content mode", async () => {

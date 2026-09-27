@@ -2,6 +2,7 @@
  * Verify slim tool profile exposes expected tools only.
  */
 import { SLIM_CHATGPT_TOOLS, shouldExposeTool } from "../dist/lib/tool-profile.js";
+import { registerComputerTools } from "../dist/tools/computer-use.js";
 
 const ALL_KNOWN = [
   "read_text_file", "write_file", "apply_patch", "glob", "grep", "run_command",
@@ -28,6 +29,20 @@ try {
 
   if (!shouldExposeTool("mcp_call", "full")) throw new Error("full should expose all");
   ok("full profile exposes all");
+  const before = process.env.COMPUTER_USE_ENABLED;
+  try {
+    delete process.env.COMPUTER_USE_ENABLED;
+    const names = [];
+    registerComputerTools({ registerTool: name => names.push(name) });
+    if (names.length || shouldExposeTool('computer_session', 'slim')) throw new Error('CU must be off by default');
+    process.env.COMPUTER_USE_ENABLED = 'true';
+    registerComputerTools({ registerTool: name => names.push(name) });
+    if (names.length !== 5 || !names.every(name => shouldExposeTool(name, 'slim'))) throw new Error('enabled CU discovery mismatch');
+    ok('CU opt-in registration and slim discovery');
+  } finally {
+    if (before === undefined) delete process.env.COMPUTER_USE_ENABLED;
+    else process.env.COMPUTER_USE_ENABLED = before;
+  }
 } catch (e) {
   fail("tool profile", e.message || e);
 }

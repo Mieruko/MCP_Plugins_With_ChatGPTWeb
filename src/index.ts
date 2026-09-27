@@ -17,6 +17,8 @@ import {
   isInitializeRequest,
 } from "./lib/mcp-session-manager.js";
 import { initUpstreamManager } from "./lib/mcp-upstream-manager.js";
+import { shutdownComputerUse } from "./lib/computer-use.js";
+import { shutdownComputerMonitors } from "./lib/computer-jobs.js";
 import { startAdminServer } from "./admin/server.js";
 import { logMcpHttpEvent, logMcpRequest } from "./lib/activity-log.js";
 import {
@@ -333,6 +335,8 @@ function shutdown(signal: string): void {
   setTimeout(() => process.exit(0), 4000).unref?.();
   void (async () => {
     await shutdownManagedProcesses();
+    shutdownComputerMonitors();
+    await shutdownComputerUse();
     await upstreamManager.shutdown();
     await Promise.all([
       new Promise<void>(resolve => adminServer.close(() => resolve())),

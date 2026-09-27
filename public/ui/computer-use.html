@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'">
+  <title>Computer Use · Workbench</title>
+  <link rel="stylesheet" href="computer-use.css">
+</head>
+<body>
+  <main>
+    <a href="workbench.html">← Workbench</a>
+    <h1>Computer Use</h1>
+    <p id="status" role="status">Đang đọc trạng thái…</p>
+    <p>Dừng phiên sẽ ngừng điều khiển. Notebook Colab trên máy chủ có thể vẫn chạy.</p>
+    <section aria-labelledby="setup-heading">
+      <h2 id="setup-heading">Chrome giữ đăng nhập</h2>
+      <p>Mỗi task có một hồ sơ Chrome/Edge lưu trên máy. Chọn đúng task, mở trình duyệt để tự đăng nhập Facebook, Colab hoặc Shopee. Sau đó bấm “Lưu và đóng” để ChatGPT dùng lại hồ sơ này.</p>
+      <label for="profile-task">Task dùng trình duyệt</label>
+      <select id="profile-task"></select>
+      <button id="setup-browser" type="button">Mở trình duyệt để đăng nhập</button>
+      <p>Đổi task sẽ dùng hồ sơ khác. Hồ sơ này độc lập với Chrome cá nhân đang mở; không sao chép mật khẩu hay cookie từ hồ sơ khác. Phiên thiết lập tự đóng sau 60 phút.</p>
+    </section>
+    <h2>Phiên điều khiển</h2>
+    <div id="sessions"></div>
+    <h2>Công việc</h2>
+    <p>Trạng thái cập nhật qua poll hoặc monitor có thời hạn. Trang này không tự chạy thao tác hoặc đánh thức ChatGPT.</p>
+    <div id="jobs"></div>
+  </main>
+  <script type="module" src="computer-use.js"></script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Computer Use · Bài kiểm tra tổng hợp</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.55 system-ui,sans-serif; background: #0b111b; color: #e7edf7; }
+    * { box-sizing: border-box; } body { margin: 0; } main { max-width: 920px; margin: auto; padding: 32px 20px 60px; }
+    h1 { font-size: clamp(25px,4vw,38px); margin: 8px 0; } h2 { margin: 0 0 12px; font-size: 21px; }
+    .eyebrow { color: #82b6ff; letter-spacing: .12em; font-size: 12px; } p { color: #b1bfd2; }
+    section { margin: 18px 0; padding: 22px; border: 1px solid #2b3c54; border-radius: 14px; background: #111c2c; }
+    label { display: block; margin: 12px 0 6px; } input,textarea,select { width: 100%; padding: 12px; font: inherit; color: inherit; background: #0a1422; border: 1px solid #506583; border-radius: 7px; }
+    textarea { min-height: 86px; resize: vertical; } button,a.download { display: inline-block; margin: 12px 10px 0 0; padding: 12px 18px; font: 600 15px system-ui; color: #071220; background: #90bbff; border: 0; border-radius: 8px; cursor: pointer; text-decoration: none; }
+    button.secondary { color: #d4dfef; background: #26364d; } button:disabled { opacity: .45; cursor: default; }
+    :focus-visible { outline: 3px solid #f6cd75; outline-offset: 3px; } .count { font-size: 42px; font-weight: 700; color: #fff; }
+    .tag { color: #9adfc7; overflow-wrap: anywhere; } .error { color: #ffadb5; } #live-ad { color: #8da1bc; font-size: 13px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 15px; background: #09111d; border-radius: 8px; } [hidden] { display:none!important; }
+  </style>
+</head>
+<body><main>
+  <div class="eyebrow">LOCAL LAB · KHÔNG GỬI FILE RA INTERNET</div>
+  <h1>Kiểm tra Computer Use</h1>
+  <p>Hoàn thành 20 click, điền form, chọn file, nhập mã khi được yêu cầu rồi xác minh kết quả. Mỗi lần bắt đầu có mã riêng.</p>
+  <section>
+    <h2>1. Bắt đầu lượt kiểm tra</h2>
+    <p>“Bắt đầu lượt mới” xóa kết quả thử trước trong trang này. Đóng/mở trình duyệt bình thường không xóa kết quả đã lưu.</p>
+    <button id="new-run">Bắt đầu lượt mới</button>
+    <p id="run-id" class="tag" aria-live="polite"></p>
+    <p id="profile-check"></p>
+  </section>
+  <section>
+    <h2>2. Bấm đúng 20 lần</h2>
+    <div id="count" class="count" aria-live="polite">0 / 20</div>
+    <button id="click" disabled>Tăng số click</button>
+    <p id="live-ad">Bảng tin thử nghiệm đang chạy…</p>
+  </section>
+  <section>
+    <h2>3. Điền thông tin và chọn file</h2>
+    <label for="caption">Mô tả</label>
+    <textarea id="caption" placeholder="Nhập mô tả thử nghiệm"></textarea>
+    <label for="destination">Đích thử nghiệm</label>
+    <select id="destination"><option value="">Chọn một đích</option><option>Google Colab</option><option>Facebook</option><option>Shopee Affiliate</option></select>
+    <label for="media">File đầu vào</label>
+    <input id="media" type="file" accept=".txt,text/plain">
+    <p id="file-status">Chưa chọn file.</p>
+    <button id="start">Chạy bài kiểm tra</button>
+    <p id="error" class="error" role="alert"></p>
+  </section>
+  <section id="prompt-panel" hidden>
+    <h2>4. Bổ sung đầu vào khi đang chạy</h2>
+    <p id="challenge"></p>
+    <label for="answer">Mã xác nhận</label><input id="answer" autocomplete="off">
+    <button id="continue">Tiếp tục xử lý</button>
+  </section>
+  <section>
+    <h2>5. Trạng thái và kết quả</h2>
+    <p id="status" role="status">Chưa bắt đầu.</p>
+    <pre id="result" hidden></pre>
+    <a id="download" class="download" hidden>Tải kết quả JSON</a>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const key = 'workbench-cu-lab-v1';
+  let state, fileData, challenge, timer, blobUrl;
+  const save = () => localStorage.setItem(key, JSON.stringify(state));
+  try { state = JSON.parse(localStorage.getItem(key)); } catch {}
+  const restored = Boolean(state?.run_id);
+  function showResult() {
+    $('result').hidden = !state.result; $('download').hidden = !state.result;
+    if (!state.result) return;
+    const json = JSON.stringify(state.result, null, 2); $('result').textContent = json;
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    blobUrl = URL.createObjectURL(new Blob([json], {type:'application/json'}));
+    $('download').href = blobUrl; $('download').download = `cu-result-${state.run_id}.json`;
+  }
+  function render() {
+    $('run-id').textContent = state?.run_id ? `Mã lượt: ${state.run_id}` : 'Chưa có mã lượt.';
+    $('count').textContent = `${state?.clicks || 0} / 20`;
+    $('click').disabled = !state?.run_id || state.clicks >= 20;
+    $('status').textContent = state?.status || 'Chưa bắt đầu.';
+    showResult();
+  }
+  if (!state?.run_id) state = {clicks:0};
+  if (state.phase === 'processing' || state.phase === 'waiting_input') {
+    state.phase = 'interrupted'; state.status = 'Lượt đang chạy đã bị gián đoạn. Chọn lại file rồi bấm Chạy bài kiểm tra.'; save();
+  }
+  $('profile-check').textContent = restored ? 'Đã khôi phục dữ liệu lượt trước từ hồ sơ trình duyệt.' : 'Hồ sơ này chưa có lượt thử đã lưu.';
+  render();
+  let tick = 0;
+  setInterval(() => { $('live-ad').textContent = `Bảng tin thử nghiệm thay đổi: ${++tick}`; }, 700);
+  $('new-run').onclick = () => {
+    clearTimeout(timer); state = {run_id:crypto.randomUUID().slice(0,8),clicks:0,phase:'ready',status:'Sẵn sàng kiểm tra.'};
+    fileData = undefined; $('media').value=''; $('caption').value=''; $('destination').value=''; $('answer').value='';
+    $('file-status').textContent='Chưa chọn file.'; $('prompt-panel').hidden=true; $('error').textContent='';
+    $('start').disabled=false; $('continue').disabled=false;
+    $('profile-check').textContent='Đã lưu mã lượt trong hồ sơ trình duyệt.'; save(); render();
+  };
+  $('click').onclick = () => { if (state.clicks < 20) { state.clicks++; save(); render(); } };
+  $('media').onchange = async () => {
+    fileData=undefined; const file=$('media').files[0];
+    if (!file) return;
+    if (file.size > 65536) { $('file-status').textContent='Chỉ dùng file thử dưới 64 KB.'; return; }
+    const text=await file.text(); if ($('media').files[0]!==file) return;
+    fileData={name:file.name,valid:text.trim()==='CU_TEST_INPUT_V1'};
+    $('file-status').textContent=`Đã chọn ${file.name} · ${fileData.valid?'Đúng nội dung file thử':'Sai nội dung file thử'}`;
+  };
+  $('start').onclick = () => {
+    const problems=[];
+    if (!state.run_id) problems.push('Hãy bắt đầu lượt mới.');
+    if (state.clicks!==20) problems.push('Cần đủ 20 click.');
+    if ($('caption').value!=='Kiểm tra Computer Use — tiếng Việt có dấu') problems.push('Mô tả chưa đúng.');
+    if ($('destination').value!=='Google Colab') problems.push('Chọn Google Colab.');
+    if (!fileData?.valid) problems.push('Chưa chọn đúng file đầu vào.');
+    $('error').textContent=problems.join(' '); if (problems.length) return;
+    challenge=`XAC-NHAN-${state.run_id}`;
+    state.phase='waiting_input'; state.status=`WAIT_INPUT_${state.run_id}`;
+    $('challenge').textContent=`Nhập nguyên văn mã: ${challenge}`; $('prompt-panel').hidden=false;
+    $('start').disabled=true; save(); render();
+  };
+  $('continue').onclick = () => {
+    if ($('answer').value!==challenge) { $('error').textContent='Mã xác nhận chưa đúng.'; return; }
+    $('error').textContent=''; $('continue').disabled=true; state.phase='processing';
+    state.status=`PROCESSING_${state.run_id} · Đang xử lý…`; save(); render();
+    timer=setTimeout(() => {
+      state.phase='done'; state.status=`CU_DONE_${state.run_id}`;
+      state.result={run_id:state.run_id,clicks:state.clicks,caption:$('caption').value,destination:$('destination').value,file:fileData.name,input_confirmed:true,status:'PASS',completed_at:new Date().toISOString()};
+      $('prompt-panel').hidden=true; save(); render();
+    },3000);
+  };
+</script></body></html>
