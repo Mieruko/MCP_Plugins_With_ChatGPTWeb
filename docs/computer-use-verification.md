@@ -72,3 +72,85 @@ M1–M2 đạt kiểm thử local; M3–M7 có code và giới hạn như trên,
 ## Yêu cầu bổ sung: Scheduled trong ChatGPT web
 
 Đã thêm kiểm tra binding vào `workbench(view=status,expected_task_id)` và receipt/audit, cập nhật hướng dẫn để bỏ `target` không cần thiết trên lượt tiếp tục đã đúng task. `workbench_control` vẫn khai báo đúng khả năng thay đổi state. Chưa nghiệm thu Scheduled thật; không kết luận server có thể bỏ qua safety checks của ChatGPT. Phân tích, bằng chứng log và mẫu prompt ReSrc ở [Scheduled troubleshooting](scheduled-mcp-troubleshooting.md).
+
+## Sửa Windows `COMPUTER_UI_CHANGED` (28/09/2026)
+
+Người dùng báo Audio Wave Studio đọc được UI nhưng click/type/Tab đều bị chặn. Kiểm tra adapter phát hiện Windows đang hash toàn bộ text desktop, gồm cursor, taskbar và UI ngoài ứng dụng. Các thay đổi này có thể gây false positive dù cửa sổ đích không đổi; chưa có cặp snapshot của phiên Audio Wave Studio để quy chính xác trường nào đã thay đổi trong phiên đó.
+
+Đã sửa:
+
+- So sánh desktop, title/handle/kích thước cửa sổ foreground, toàn bộ cây control của nó (gồm tọa độ, focus, value, hierarchy) và handle/depth/status/kích thước các cửa sổ khác. Bỏ cursor, screenshot metadata, title động và cây control của ứng dụng nền. Cửa sổ mới/đổi handle, layout, modal hoặc control vẫn bị chặn; không tắt guard.
+- `windows_targets` cung cấp label riêng cho mỗi observation, ánh xạ tới tọa độ control đã quan sát và xác minh lại. Không dùng index nội bộ Windows-MCP: bản 0.8.6 nhận label nhưng không in chúng trong semantic tree, thứ tự array nội bộ cũng khác cây hiển thị. Click/type/scroll thiếu label hợp lệ bị từ chối.
+- Ảnh và cây UI lấy trong cùng Snapshot; bỏ Screenshot riêng vì đường đó ghi đè desktop_state bằng cây rỗng. Window title phải khớp chính xác. Snapshot thiếu/khác format, trùng window name hoặc bị cắt bị từ chối.
+
+Kiểm chứng:
+
+- `npm test`: PASS exit 0, gồm build và các regression core/permission/routing/workbench.
+- `node scripts/test-computer-use.mjs`: PASS exit 0 qua server HTTP và Chrome thật; 20 click khoảng 3 giây, upload, Unicode, snapshot, stale guard, policy/writer, isolation và restart.
+- `npm run test:computer:windows`: kiểm tra handshake/schema runtime thật; dùng renderer Python thật trên dữ liệu giả lập, không chụp desktop. Fixture transport tái hiện cursor/clock thay đổi: click/type/Tab/scroll được gửi đúng một lần. Focus/title/handle/tọa độ/control/modal đổi vẫn chặn; mất response không replay. Đây là kiểm thử adapter, không phải bằng chứng thao tác native Audio Wave Studio đã PASS.
+
+Chưa restart server/tunnel đang dùng, không đổi `.env` hay policy. Bản build cần được server nạp lại rồi mới thử lại trên ChatGPT. Native UI, DPI/multiple monitors và quy trình Audio Wave Studio vẫn chưa được nghiệm thu trong lượt sửa này. Snapshot/preflight/action vẫn có khoảng thời gian không nguyên tử với thao tác của người dùng hoặc ứng dụng khác.
+
+### Tiếp tục: `COMPUTER_OBSERVE_FORMAT` và tọa độ ngẫu nhiên
+
+Tái hiện trên runtime Windows-MCP thật bằng `scripts/diagnose-computer-windows.mjs`: một TextContent chứa JSON array một chuỗi (`list[str]`), không phải text snapshot thuần. Parser cũ từ chối trước kiểm tra focus. Fixture cũ gọi renderer Python trực tiếp nên đã bỏ sót bước FastMCP serialize response — kết quả PASS trước đó chưa đủ để xác nhận giao thức desktop thật.
+
+Đã giải mã giới hạn các envelope text đã biết (string hoặc array một string), chuẩn hóa CRLF, giữ ảnh native và vẫn từ chối object/nested array/nhiều snapshot không rõ nghĩa. Thêm fixture FastMCP stdio thật bằng chính runtime cài trong venv: observe có/không ảnh và preflight trước Shortcut giả lập đều PASS; không gửi phím ra desktop trong fixture.
+
+Sau khi mở/focus bản release Audio Wave Studio bằng Computer Use của Codex, adapter dự án đọc được 234 targets, gồm `Mở project`. Hai lần observe ban đầu vẫn khác ở đúng control vùng cuộn `Complementary`: điểm `(939,859)` đổi thành `(760,924)` dù chưa thao tác. Mã nguồn Windows-MCP xác nhận `random_point_within_bounding_box` được dùng cho mỗi lần capture vùng cuộn. Đã thêm bridge tiến trình con, pin 0.8.6, dùng tâm rectangle ổn định. Không chỉnh sửa thư viện đã cài và không nới điều kiện so sánh tọa độ.
+
+Chạy lại chẩn đoán trên Audio Wave Studio thật: **exit 0, 234 targets, `open_project_found=true`, `identity_unchanged=true`, `changed_sections=[]`**. Đây là bằng chứng đọc UI và identity ổn định trên desktop thật, chưa phải bằng chứng click/chọn file/preview/render qua MCP. `npm run test:computer:windows` PASS exit 0 với kiểm tra serializer thật, tâm vùng cuộn ổn định/thay đổi theo geometry, và các guard/refusal đã có. Server/tunnel live chưa restart; cần nạp build mới và mở session Windows mới.
+
+### Đối chiếu bug report Audio Wave Studio 09:28–09:31
+
+Báo cáo nguồn: `D:/MakeClip/AudioWaveStudio/COMPUTER_USE_BUG_REPORT_2026-09-28.md`. Tiến trình server quan sát được khởi động 09:27:08, sau build 09:11; không quy lỗi này cho việc quên restart. Chưa có cặp snapshot của các observation ID trong báo cáo nên chưa kết luận field gây `UI_CHANGED` trong phiên ChatGPT đó.
+
+Lệnh tái hiện trong báo cáo dùng `target:"Mở project"`/`target:"Tên video"` trên backend Windows. Adapter yêu cầu `label` từ `windows_targets`; trước đây preflight chạy trước kiểm tra label nên che mất lỗi tham số bằng lỗi focus/tree. Đã sửa thứ tự và metadata công cụ để trả `COMPUTER_TARGET_REQUIRED` trước capture khi dùng sai target. Label không có trong observation trả `COMPUTER_TARGET_NOT_FOUND`.
+
+Thêm `ComputerUiError` và response có `data.code`, diagnostics giới hạn/redacted, `adapter_revision`. Pin handle trong session sau lần observe hợp lệ đầu; cửa sổ cùng title nhưng handle khác không tự rebind. Cây chỉ có nút khung cửa sổ trả `COMPUTER_TREE_NOT_READY`, không cấp token. Không khẳng định đã có detector WebView load hoàn chỉnh: trạng thái `web_content_ready=unknown`. Không bỏ full app-tree guard vì chưa có chứng cứ cho phép bỏ các field khác. Chưa hỗ trợ PID/owner-modal metadata hoặc tự reauthorize; đóng/mở session vẫn là bước đổi cửa sổ rõ ràng.
+
+`npm run test:computer:windows`: PASS, gồm serializer FastMCP thật, typed errors, redaction, bad-target-before-preflight, frame-only không cấp token, thay handle không rebind, không gửi input khi UI đổi. `CU_TEST_WINDOWS_PROTOCOL=true node scripts/test-computer-use.mjs`: PASS exit 0, kiểm tra lỗi Windows qua HTTP dispatch thật bằng server/control directory cô lập; phần Windows chỉ handshake/schema và lỗi tham số, không capture/click desktop. Bộ browser đối chứng vẫn chạy Chrome thật. `npm test`: PASS exit 0. Build và Windows suite chạy lại sau bổ sung revision vào session status cũng PASS. `git diff --check`: PASS.
+
+Lượt native local trước đó đã xác nhận một click qua adapter mở hộp chọn project; bài test sau đó thất bại vì giả định hộp thoại đổi title (upstream giữ title cha). Khi sửa bài test và thử lại, người dùng nhấn Escape dừng Computer Use; lượt observe tiếp theo bị FORMAT. Không ghi toàn bộ native suite PASS, không coi đây là nghiệm thu connector ChatGPT. Lượt xử lý báo cáo này không dùng Computer Use của Codex hoặc connector thay thế để thao tác desktop, không restart server live và không sửa báo cáo QA/media của Audio Wave Studio.
+
+## CU-06 và CU-07 — timeout sau Type và desktop/Windows Search mất phản hồi
+
+Người dùng báo trên revision `windows-2026-09-28-diagnostics-1`: sau `Type(label=11)` chưa xác định input thực thi hay chưa, hai lần observe `McpError -32001`, đóng/mở session không chữa; đồng thời desktop không kéo được cửa sổ và Windows Search không tương tác được. Đây là hai triệu chứng được gộp kiểm tra nhưng chưa có dump UIA/trace hệ điều hành để xác định cùng một nguyên nhân.
+
+Rà soát Windows-MCP 0.8.6 tại private runtime phát hiện `Desktop.get_state(use_ui_tree=True)` quét cả foreground và các cửa sổ khác (kể cả taskbar/Explorer), còn `SendKeys` có thể đi qua chuỗi Ctrl+A/Backspace/Ctrl+V. SDK timeout không tự chứng minh Python COM/UIA đã kết thúc. Upstream cũng có overlay cửa sổ topmost khi chụp ảnh. Không khẳng định riêng cơ chế nào gây treo thực tế.
+
+Revision `windows-2026-09-28-recovery-2` thay đổi chỉ trong phiên Windows: bridge pin version giới hạn lấy handle UIA vào foreground root, không quét các cửa sổ nền; tắt flash overlay, đặt tree budget 350 và thời hạn 12 giây cho một lời gọi upstream. Khi lời gọi ném lỗi/mất phản hồi, thu hồi session và đóng chính child trước khi giải phóng lease, nếu cleanup lỗi giữ revoked lease. Đối với action, ghi `request_id`, `status=unknown`, `action_completed=null`, không tự replay. `computer_session(status)` cho xem receipt 10 phút theo task/conversation kể cả session đã đóng, không chứa giá trị đã gõ. ACK từ backend không được nâng thành PASS trên UI.
+
+Kiểm thử sau sửa: `npm run test:computer:windows` **PASS exit 0**, xác minh renderer/stdio thật bằng dữ liệu giả lập, scoping foreground bằng Win32 mock, kết quả ACK không đồng nghĩa xác minh UI, lost-response quarantine và receipt còn sau close, isolation giữa conversation, timeout observe dừng child và nhả lease. Không hề chụp hoặc nhập vào desktop người dùng. `npm run test:computer` **PASS exit 0** trên fixture Chrome thật, gồm 20 click, unknown action, Stop, upload, restart và task isolation. Bản sửa chưa được load vào server live; chưa chạy native test Audio Wave Studio vì người dùng báo mất quyền điều khiển desktop. Windows drag/Search chưa được kiểm chứng phục hồi tại thời điểm ghi nhận. Xem hướng dẫn xử lý tại `docs/computer-use.md`.
+
+## Browser dùng chung workspace + task — sửa `COMPUTER_BUSY`
+
+Trước sửa, `openComputerSession` chặn mọi browser session thứ hai có cùng `taskId/backend`, khiến chat thứ hai không sử dụng được browser đang mở dù cùng task. Browser dashboard setup cũng phải đóng trước khi ChatGPT dùng lại profile. Không có nhu cầu phân chia task/workspace chỉ để vượt khóa này.
+
+Đã chuyển thành một session/backend mỗi task trong cùng execution workspace và Workbench server; `open` thứ hai **join session hiện hữu**, `open` song song chờ cùng một lời gọi khởi tạo. Mỗi conversation phải được gán đúng task và còn machine scope rồi tự `open`; không tự dùng được session chỉ bằng ID. Hàng đợi browser tuần tự hóa observe/action/upload; observation riêng theo conversation, action invalidates tất cả observation cũ. Chooser chỉ do chat mở được upload. `computer_session(close)` detach chat, backend chỉ đóng khi chat cuối rời hoặc Dashboard Stop/thu hồi task. Một lệnh `open` từ ChatGPT khi dashboard setup vẫn mở chuyển cùng browser sang automation, không spawn Chrome thứ hai.
+
+**Kiểm thử trên fixture:**
+
+- `npm run test:computer` PASS exit 0: qua HTTP thật, chat A/B cùng task nhận cùng session ID, join idempotent, B không được dùng trước join, B chỉ observe không hủy token của A, action của A/B hủy token cũ của bên kia; B detach không đóng Chrome của A; chooser thuộc A thì B không đọc/chiếm upload.
+- Hai `open` thực sự đến đồng thời qua adapter chạy trên Chrome headless chỉ tạo một child/profile/lease; hai observe song song được tuần tự; khi A detach, B tiếp tục observe; đã kiểm thử chuyển `manual` → automation trên cùng backend bằng mô phỏng trạng thái setup (không mở cửa sổ headed trên desktop đang có lỗi native).
+- Task khác vẫn dùng profile riêng; permission/Basic writer, Stop/fault/restart, 20 click và no-replay vẫn PASS. `npm run test:computer:windows`, `npm run test:multimodal`, `npm test` PASS exit 0.
+
+Giới hạn: chia sẻ ở **cùng Workbench server**; lease của tiến trình Workbench khác vẫn bị từ chối để tránh hai browser cùng ghi một profile. Dashboard setup headed thật và sự tương tác bằng chính phiên ChatGPT web sau restart live chưa được nghiệm thu trong lượt này. Không restart server, không sửa `.env`, không commit/push các file đang có thay đổi của những phiên khác.
+
+## Mở rộng: một browser toàn Workbench, kể cả workspace/task khác nhau
+
+Theo yêu cầu tiếp theo, bỏ chia profile/session theo task. `computer_session(open,backend=browser)` cấp membership theo bộ ba **task ID + execution workspace + conversation owner**, nhưng mọi membership trỏ tới cùng browser MCP, Chrome và profile `profiles/workbench-shared-browser`. Các lệnh đi qua một hàng đợi; mỗi membership có observation riêng, action vô hiệu token toàn browser. Hai `open` đến cùng lúc chỉ tạo một child. Task bị đổi policy, chuyển writer hoặc thu hồi quyền sẽ chỉ bị tách khỏi browser; task khác vẫn tiếp tục. Một session chỉ đóng khi member cuối rời, lease hết hạn hoặc Dashboard Stop. Windows native vẫn giữ lease riêng/exclusive.
+
+Job/evidence vẫn lưu theo task và poll/cancel theo owner; upload vẫn qua `validatePath` theo chính context task gọi lệnh. Cookie, tab và trạng thái trang **cố ý chia sẻ**, nên browser không còn là ranh giới giữa các project. Nếu chooser của task bị thu hồi quyền còn mở, không cho task khác chiếm upload; cần Dashboard Stop để giải quyết. Dữ liệu profile cũ theo task không bị xóa/đọc hoặc tự nhập sang profile chung, cần tự đăng nhập lại.
+
+Kiểm thử `npm run test:computer` PASS exit 0: cùng task và hai task trong một workspace nhận cùng session ID qua dispatch HTTP; Chrome thật chứng thực hai execution workspace khác nhau dùng cùng profile/cookie/session; cùng owner string khác task không được mượn membership; thu hồi task đầu vẫn giữ session hoạt động cho workspace thứ hai; mở đồng thời, detach, chooser, restart/Stop và timeout vẫn có test. Dashboard setup headed thật và ChatGPT web sau server restart chưa nghiệm thu, không thay đổi server live trong lần này.
+
+Kiểm thử bổ sung sau sửa: `npm run test:computer:windows`, `npm run test:multimodal`, `npm test`, `node --check public/ui/computer-use.js` và `git diff --check` đều PASS exit 0. Các cảnh báo LF→CRLF của Git không phải test failure. Chưa commit/push và không tự dọn các file untracked thuộc phiên khác.
+
+## Chuẩn hóa một Chrome và dùng lại profile đã lưu — 2026-09-28
+
+Chủ máy xác nhận chia sẻ một Chrome cho tất cả workspace/task. Bổ sung `COMPUTER_BROWSER_PROFILE_PATH` (đường dẫn tuyệt đối tới user-data) để dùng trực tiếp profile cũ, không tạo profile rỗng hoặc copy cookie. `.env` local chọn profile của task `d8b154d1-a915-442c-8216-824a7f1da699` trong ảnh người dùng; đã đối chiếu SHA-256 của task ID và sự tồn tại của `Default/Preferences`. Không đọc nội dung cookie hoặc xác nhận trạng thái đăng nhập của các dịch vụ thật.
+
+Dashboard trả `shared_profile` và hiển thị đường dẫn khi chưa mở phiên. Task dropdown chỉ chọn quyền mở Chrome. Sửa `assertControlIdle` kiểm tra membership thật thay vì controller đại diện; regression HTTP xác nhận controller phụ ở task khác cũng nhận `CONTROL_BUSY` trước khi rời phiên.
+
+`npm run test:computer` PASS exit 0: đường dẫn cấu hình được dùng qua approval/HTTP/dashboard, đường dẫn tương đối bị từ chối, cookie/localStorage giữ qua reopen và chia sẻ sang task/workspace khác, mở đồng thời chỉ tạo một browser. `node --check public/ui/computer-use.js` và `git diff --check` PASS. Các fixture dùng thư mục tạm riêng, không mở profile thật; server live chưa restart để nạp code và `.env` mới.

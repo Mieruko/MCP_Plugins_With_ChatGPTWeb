@@ -9,23 +9,38 @@
 </head>
 <body>
   <main>
-    <a href="workbench.html">← Workbench</a>
-    <h1>Computer Use</h1>
-    <p id="status" role="status">Đang đọc trạng thái…</p>
-    <p>Dừng phiên sẽ ngừng điều khiển. Notebook Colab trên máy chủ có thể vẫn chạy.</p>
-    <section aria-labelledby="setup-heading">
-      <h2 id="setup-heading">Chrome giữ đăng nhập</h2>
-      <p>Mỗi task có một hồ sơ Chrome/Edge lưu trên máy. Chọn đúng task, mở trình duyệt để tự đăng nhập Facebook, Colab hoặc Shopee. Sau đó bấm “Lưu và đóng” để ChatGPT dùng lại hồ sơ này.</p>
-      <label for="profile-task">Task dùng trình duyệt</label>
-      <select id="profile-task"></select>
-      <button id="setup-browser" type="button">Mở trình duyệt để đăng nhập</button>
-      <p>Đổi task sẽ dùng hồ sơ khác. Hồ sơ này độc lập với Chrome cá nhân đang mở; không sao chép mật khẩu hay cookie từ hồ sơ khác. Phiên thiết lập tự đóng sau 60 phút.</p>
+    <nav><a class="back-link" href="workbench.html">← Workbench</a><span class="eyebrow">ĐIỀU KHIỂN MÁY TÍNH</span></nav>
+    <header class="page-header">
+      <div><h1>Computer Use</h1><p class="subtitle">Một trình duyệt. Tiếp tục mọi công việc.</p></div>
+      <div class="capabilities"><span id="browser-status" class="badge">Chrome · đang kiểm tra</span><span id="windows-status" class="badge">Windows · đang kiểm tra</span></div>
+    </header>
+    <p id="status" class="notice" role="status" hidden></p>
+    <section class="setup panel" aria-labelledby="setup-heading">
+      <div class="setup-intro">
+        <div class="browser-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01M9 13l3 2-3 2"/></svg></div>
+        <div><div class="eyebrow">TRÌNH DUYỆT CHUNG</div><h2 id="setup-heading">Chrome của bạn, luôn sẵn sàng</h2><p>Dùng lại hồ sơ đã lưu cho Facebook, Colab và Shopee.<br> Mọi task cùng sử dụng đăng nhập và các tab đang mở.</p></div>
+        <span id="chrome-state" class="badge">Đang kiểm tra</span>
+      </div>
+      <div class="launch-row">
+        <div class="task-field"><label for="profile-task">Task cấp quyền điều khiển</label><select id="profile-task" aria-describedby="task-help"><option value="">Đang tải task…</option></select></div>
+        <button id="setup-browser" class="primary" type="button" disabled>Mở Chrome</button>
+      </div>
+      <p id="task-help" class="hint">Đổi task vẫn dùng cùng Chrome. Quyền thao tác được kiểm tra theo task bạn chọn.</p>
+      <details class="profile-details"><summary>Hồ sơ đã lưu &amp; cách hoạt động</summary><div class="details-content"><span class="field-label">ĐƯỜNG DẪN HỒ SƠ CHUNG</span><code id="shared-profile">Đang đọc hồ sơ…</code><p>Chrome này có hồ sơ riêng với Chrome cá nhân. Các chat điều khiển lần lượt trên cùng cửa sổ. Bạn có thể đăng nhập thủ công rồi để ChatGPT tiếp tục ngay trong phiên đó.</p></div></details>
     </section>
-    <h2>Phiên điều khiển</h2>
-    <div id="sessions"></div>
-    <h2>Công việc</h2>
-    <p>Trạng thái cập nhật qua poll hoặc monitor có thời hạn. Trang này không tự chạy thao tác hoặc đánh thức ChatGPT.</p>
-    <div id="jobs"></div>
+    <div class="workspace-grid">
+      <section class="panel activity-panel" aria-labelledby="sessions-heading">
+        <div class="section-heading"><h2 id="sessions-heading">Phiên điều khiển</h2><span id="session-count" class="count">0</span></div>
+        <p class="section-description">Các kết nối Chrome và Windows hiện tại.</p>
+        <div id="sessions" class="card-list"><p class="loading">Đang tải phiên…</p></div>
+      </section>
+      <section class="panel activity-panel" aria-labelledby="jobs-heading">
+        <div class="section-heading"><h2 id="jobs-heading">Công việc</h2><span id="job-count" class="count">0</span></div>
+        <p class="section-description">Tiến độ gần nhất của các tác vụ Computer Use.</p>
+        <div id="jobs" class="card-list"><p class="loading">Đang tải công việc…</p></div>
+      </section>
+    </div>
+    <footer><span id="last-updated">Đang kết nối…</span><p>Dừng Chrome sẽ đóng phiên cho tất cả chat. Notebook Colab trên máy chủ có thể vẫn chạy.</p></footer>
   </main>
   <script type="module" src="computer-use.js"></script>
 </body>

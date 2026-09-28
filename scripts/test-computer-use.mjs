@@ -17,6 +17,7 @@ const project = path.join(tmp, 'project'); await fs.mkdir(project);
 const media = path.join(tmp, 'clip.txt'); await fs.writeFile(media, 'synthetic media only');
 const upstream = path.join(tmp, 'upstream.json'); await fs.writeFile(upstream, '{"version":1,"servers":[]}');
 const [port, adminPort] = await freePorts(2);
+const testWindows = process.env.CU_TEST_WINDOWS_PROTOCOL === 'true';
 let runCount = 0;
 const fixture = http.createServer((req, res) => {
   if (req.url === '/run-count' && req.method === 'POST') { runCount++; res.end('recorded'); return; }
@@ -36,8 +37,10 @@ let logs = '';
 const serverOptions = { cwd: tmp, windowsHide: true,
   env: { ...process.env, PORT: String(port), ADMIN_PORT: String(adminPort), WORKSPACE_PATH: project,
     WORKBENCH_PATH: path.join(tmp, 'control'), MCP_UPSTREAM_CONFIG: upstream,
+    COMPUTER_BROWSER_PROFILE_PATH: path.join(tmp, 'saved-browser-profile'),
     MCP_AUTH_TOKEN: 'cu-fixture-token', ADMIN_TOKEN: 'cu-fixture-admin', WORKBENCH_DEFAULT_MODE: 'ask', WORKBENCH_EXPERIENCE: 'advanced',
-    CHATGPT_TOOL_PROFILE: 'slim', COMPUTER_USE_ENABLED: 'true', COMPUTER_WINDOWS_ENABLED: 'false', COMPUTER_BROWSER_HEADLESS: 'true',
+    CHATGPT_TOOL_PROFILE: 'slim', COMPUTER_USE_ENABLED: 'true', COMPUTER_WINDOWS_ENABLED: String(testWindows), COMPUTER_BROWSER_HEADLESS: 'true',
+    COMPUTER_WINDOWS_COMMAND: path.join(repo, '.computer-use-runtime/windows/Scripts/windows-mcp.exe'),
     WORKSPACE_PATHS: '', EXTRA_WORKSPACE_PATHS: '', ALLOWED_WORKSPACE_PATHS: '',
     AUDIT_LOG_PATH: path.join(tmp, 'audit.log'), CHECKPOINT_PATH: path.join(tmp, 'checkpoints'), MCP_SHELL_STATE_DIR: path.join(tmp, 'shell'),
   }, stdio: ['ignore', 'pipe', 'pipe'] };
@@ -104,19 +107,69 @@ try {
   assert.equal((await admin('/api/workbench/computer')).sessions.length, 0);
   const approved = data(await admin(`/api/workbench/operations/${pending.operation_id}/decision`, { approve: true }));
   assert.ok(approved.session_id);
+  assert.equal(approved.profile.path, serverOptions.env.COMPUTER_BROWSER_PROFILE_PATH);
+  const dashboardProfile = await admin('/api/workbench/computer');
+  assert.equal(dashboardProfile.shared_profile.path, approved.profile.path);
+  assert.ok(dashboardProfile.profiles.every(profile => profile.path === approved.profile.path));
   await admin(`/api/workbench/tasks/${taskId}/policy`, { mode: 'full', workspaceOnly: false }, 'PUT');
   await waitEmpty();
   console.log('OK CU slim discovery, workspace refusal, Ask approval and policy revocation');
+  if (testWindows) {
+    const nativeSession = data(await call('computer_session', { action: 'open', backend: 'windows', window_title: 'Protocol-only fixture; never captured' }));
+    assert.ok(nativeSession.adapter_revision);
+    try {
+      const result = await call('computer_act', { session_id: nativeSession.session_id,
+        observation_id: '00000000-0000-4000-8000-000000000001', action: { kind: 'click', target: 'Mở project' } });
+      fail(result, /COMPUTER_TARGET_REQUIRED/);
+      const payload = result.structuredContent ?? JSON.parse(result.content[0].text);
+      assert.equal(payload.data.code, 'COMPUTER_TARGET_REQUIRED');
+      assert.equal(payload.data.diagnostics.required_field, 'action.label');
+      assert.equal(payload.data.diagnostics.action_sent, false);
+      assert.equal(payload.data.adapter_revision, nativeSession.adapter_revision);
+    } finally { data(await call('computer_session', { action: 'close', session_id: nativeSession.session_id })); }
+    console.log('OK Windows target error and adapter revision survive real HTTP dispatch; no desktop captured or input sent');
+  }
   let sessionId = data(await call('computer_session', { action: 'open' })).session_id;
   fail(await call('computer_observe', { session_id: sessionId }, 'b'), /COMPUTER_NOT_OWNED/);
-  fail(await call('computer_session', { action: 'open' }, 'b'), /COMPUTER_BUSY/);
+  const firstObservation = data(await call('computer_observe', { session_id: sessionId }));
+  const joined = data(await call('computer_session', { action: 'open' }, 'b'));
+  assert.equal(joined.session_id, sessionId, 'same task attaches to one browser process');
+  assert.equal(joined.shared, true);
+  assert.equal(joined.controller_count, 2);
+  assert.equal(data(await call('computer_session', { action: 'open' })).session_id, sessionId, 'idempotent open');
+  assert.equal(data(await call('computer_session', { action: 'status' }, 'b')).sessions[0].session_id, sessionId);
+  const observedB = data(await call('computer_observe', { session_id: sessionId }, 'b'));
+  const navigatedA = data(await call('computer_act', { session_id: sessionId,
+    observation_id: firstObservation.observation_id, action: { kind: 'navigate', url: fixtureUrl } }));
+  assert.ok(navigatedA.observation_id, 'a second controller observing does not erase the first token');
+  fail(await call('computer_act', { session_id: sessionId, observation_id: observedB.observation_id,
+    action: { kind: 'key', key: 'Tab' } }, 'b'), /COMPUTER_STALE_OBSERVATION/);
+  const currentB = data(await call('computer_observe', { session_id: sessionId }, 'b'));
+  const currentA = data(await call('computer_observe', { session_id: sessionId }));
+  const changedByB = data(await call('computer_act', { session_id: sessionId,
+    observation_id: currentB.observation_id, action: { kind: 'key', key: 'Tab' } }, 'b'));
+  assert.equal(changedByB.completed, 1);
+  fail(await call('computer_act', { session_id: sessionId, observation_id: currentA.observation_id,
+    action: { kind: 'key', key: 'Tab' } }), /COMPUTER_STALE_OBSERVATION/);
+  const detachedB = data(await call('computer_session', { action: 'close', session_id: sessionId }, 'b'));
+  assert.equal(detachedB.detached, true);
+  assert.equal(detachedB.closed, false);
+  assert.equal(data(await call('computer_session', { action: 'status' })).sessions[0].controller_count, 1);
+  fail(await call('computer_observe', { session_id: sessionId }, 'b'), /COMPUTER_NOT_OWNED/);
+  assert.ok(data(await call('computer_observe', { session_id: sessionId })).observation_id,
+    'detaching second chat leaves original browser operational');
+  console.log('OK two conversations share one task browser, serialized actions, isolated observations and detach without closing Chrome');
   const secondTask = await admin('/api/workbench/tasks', { title: 'Other CU task', workspaceId, environment: { mode: 'local' } });
   await admin(`/api/workbench/tasks/${secondTask.id}/policy`, { mode: 'full', workspaceOnly: false }, 'PUT');
   fail(await call('workbench_control', { action: 'target', task_id: secondTask.id, create_missing: false }), /CONTROL_BUSY/);
   data(await call('workbench_control', { action: 'target', task_id: secondTask.id, create_missing: false }, 'b'));
   fail(await call('computer_observe', { session_id: sessionId }, 'b'), /COMPUTER_NOT_OWNED/);
   const secondSession = data(await call('computer_session', { action: 'open' }, 'b')).session_id;
-  data(await call('computer_session', { action: 'close', session_id: secondSession }, 'b'));
+  fail(await call('workbench_control', { action: 'target', task_id: taskId, create_missing: false }, 'b'), /CONTROL_BUSY/);
+  assert.equal(secondSession, sessionId, 'another task in same workspace attaches to global browser');
+  assert.equal(data(await call('computer_session', { action: 'status' }, 'b')).sessions[0].task_id, secondTask.id,
+    'status reports invoking task, not the first browser owner');
+  assert.equal(data(await call('computer_session', { action: 'close', session_id: secondSession }, 'b')).detached, true);
   data(await call('workbench_control', { action: 'target', task_id: taskId, create_missing: false }, 'b'));
   let observation;
   async function observe(image = false) {
@@ -146,11 +199,14 @@ try {
   await act({ kind: 'type', target: ref(snapshot, 'textbox', 'Caption'), text: 'Tiếng Việt — mô tả ảnh và clip' });
   fail(await call('computer_act', { session_id: sessionId, observation_id: oldObservation, action: { kind: 'key', key: 'Enter' } }), /COMPUTER_STALE_OBSERVATION/);
   snapshot = await observe(); assert.ok(snapshot.includes('Tiếng Việt'));
+  assert.equal(data(await call('computer_session', { action: 'open' }, 'b')).session_id, sessionId);
   await act({ kind: 'click', target: ref(snapshot, 'button', 'Media') });
+  fail(await call('computer_observe', { session_id: sessionId }, 'b'), /COMPUTER_FILE_CHOOSER_PENDING/);
   snapshot = await observe();
   fail(await call('computer_upload', { session_id: sessionId, observation_id: observation.observation_id, paths: [path.join(tmp, 'missing.txt')] }), /ENOENT|COMPUTER_FILE/);
   const uploaded = await call('computer_upload', { session_id: sessionId, observation_id: observation.observation_id, paths: [media] });
   data(uploaded);
+  assert.equal(data(await call('computer_session', { action: 'close', session_id: sessionId }, 'b')).detached, true);
   snapshot = await observe(); assert.ok(snapshot.includes('clip.txt'));
   const job = data(await call('computer_job', { action: 'create', workflow: 'generic', session_id: sessionId, expected_url: fixtureUrl,
     success_text: ['DONE_RUN_7c1'], failure_text: 'ERROR_RUN_7c1', input_text: 'WAIT_TEXT_7c1', artifact_text: 'result-7c1.txt' }));
@@ -231,15 +287,18 @@ try {
     assert.equal(setup.manual_setup, true);
     assert.equal(setup.profile.headed, true, 'manual setup opens a visible browser even if automation is headless');
     assert.equal(setup.profile.persistent, true);
-    fail(await call('computer_session', { action: 'open' }, 'b'), /COMPUTER_BUSY/);
-    fail(await call('computer_observe', { session_id: setup.session_id }, 'b'), /COMPUTER_NOT_OWNED/);
+    const linkedSetup = data(await call('computer_session', { action: 'open' }, 'b'));
+    assert.equal(linkedSetup.session_id, setup.session_id, 'automation attaches to the headed setup browser');
+    assert.equal(linkedSetup.manual_setup, false, 'explicit open transitions setup to automation');
+    assert.equal(linkedSetup.profile.headed, true, 'do not relaunch the setup profile headless');
+    assert.ok(data(await call('computer_observe', { session_id: setup.session_id }, 'b')).observation_id);
     const afterSetup = await admin('/api/workbench');
     assert.deepEqual(afterSetup.tasks.map(t => [t.id, t.policy]), beforeSetup.tasks.map(t => [t.id, t.policy]));
     const afterExperience = await admin(`/api/workbench/workspaces/${workspaceId}/experience`);
     assert.equal(afterExperience.writer.sessionId, nextWriter.sessionId, 'setup does not transfer writer');
     await admin(`/api/workbench/computer/sessions/${setup.session_id}/stop`, {});
     await waitEmpty();
-    console.log('OK visible manual setup through dashboard, same persistent profile, blocks automation, no policy/writer changes, Save/close releases lease');
+    console.log('OK dashboard setup browser reused by ChatGPT without closing/reopening, same profile and policy/writer unchanged');
   }
 } catch (error) {
   await fs.writeFile(path.join(tmp, 'server.log'), logs);

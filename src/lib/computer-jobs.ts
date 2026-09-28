@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
-import { computerAuthority, computerDataRoot, observeComputer, ownedComputerSession, closeComputerSession, computerSessionSummaries } from "./computer-use.js";
+import { computerAuthority, computerDataRoot, observeComputer, ownedComputerSession, leaveComputerSession, computerMemberAttached, computerDesktopBlocked } from "./computer-use.js";
+import { ComputerUiError } from "./computer-error.js";
 import { executionContext } from "./workbench-context.js";
 
 export const COMPUTER_WORKFLOWS = {
@@ -89,11 +90,13 @@ async function poll(id: string) {
   if (job.owner !== computerAuthority().owner) throw new Error("COMPUTER_JOB_NOT_OWNED: resume explicitly after the previous controller has closed");
   if (["succeeded", "failed", "cancelled"].includes(job.state)) return job;
   try {
-    const session = ownedComputerSession(job.session_id);
+    ownedComputerSession(job.session_id);
     const result = await observeComputer(job.session_id, false);
-    if (result.isError || !session.observation) throw new Error("Observation unavailable");
-    const text = session.observation.text;
-    job.last_observation = session.observation.id;
+    if (result.isError) throw new Error("Observation unavailable");
+    const observed = result.structuredContent?.data as { output?: string; observation_id?: string } | undefined;
+    if (!observed?.output || !observed.observation_id) throw new Error("Observation unavailable");
+    const text = observed.output;
+    job.last_observation = observed.observation_id;
     // Page URL comes from the backend, not an arbitrary mention in the page body.
     const pageUrl = /^- Page URL:\s*(.+)$/m.exec(text)?.[1]?.trim();
     if (pageUrl !== job.expected_url) { job.state = "unknown"; job.note = "Target URL changed or could not be verified; inspect the active tab."; }
@@ -105,7 +108,11 @@ async function poll(id: string) {
       job.state = job.evidence.length === required.length ? "succeeded" : "running";
       job.note = "State reflects the configured UI evidence; choose unique notebook/post result markers, not generic buttons or static page text.";
     }
-  } catch { job.state = "disconnected"; job.note = "Could not observe the owned session. Open/reconnect explicitly and resume; do not replay the last action."; }
+  } catch (error) {
+    if (error instanceof ComputerUiError && error.code === "COMPUTER_DESKTOP_BUSY") {
+      job.note = "Browser observation paused while Windows owns the desktop. State and evidence are from the last observation; no new result was checked.";
+    } else { job.state = "disconnected"; job.note = "Could not observe the owned session. Open/reconnect explicitly and resume; do not replay the last action."; }
+  }
   return save(job);
 }
 export function resumeComputerJob(id: string, sessionId: string) { return serialized(id, () => resume(id, sessionId)); }
@@ -113,7 +120,7 @@ async function resume(id: string, sessionId: string) {
   const job = await readComputerJob(id);
   if (["succeeded", "failed", "cancelled"].includes(job.state)) throw new Error("COMPUTER_JOB_TERMINAL: create a new job for a new run");
   if (ownedComputerSession(sessionId).backend !== "browser") throw new Error("COMPUTER_JOB_BROWSER_REQUIRED");
-  if (job.owner !== computerAuthority().owner && computerSessionSummaries().some(session => session.session_id === job.session_id)) {
+  if (job.owner !== computerAuthority().owner && computerMemberAttached(job.session_id, job.task_id, job.owner)) {
     throw new Error("COMPUTER_JOB_BUSY: previous controller must close before another conversation resumes");
   }
   stopMonitor(id);
@@ -127,9 +134,9 @@ async function cancel(id: string) {
   stopMonitor(id);
   // An absent session is already stopped. A present session must be owned,
   // and failure to close must not be reported as successful cancellation.
-  if (computerSessionSummaries().some(session => session.session_id === job.session_id)) {
+  if (computerMemberAttached(job.session_id, job.task_id, job.owner)) {
     ownedComputerSession(job.session_id, true);
-    await closeComputerSession(job.session_id);
+    await leaveComputerSession(job.session_id);
   }
   job.state = "cancelled"; job.note = "Control stopped. This does not prove remote Colab execution was interrupted; verify runtime separately.";
   return save(job);
@@ -153,7 +160,7 @@ export async function monitorComputerJob(id: string, durationSeconds: number) {
       try {
         // A user's active call wins; a busy observation is not a disconnect.
         const session = executionContext.run(context, () => ownedComputerSession(job.session_id));
-        if (!session.busy) {
+        if (!session.busy && !computerDesktopBlocked(session)) {
           const current = await executionContext.run(context, () => pollComputerJob(id));
           if (monitors.get(id) !== monitor) return;
           if (!["created", "running"].includes(current.state)) { stopMonitor(id); return; }

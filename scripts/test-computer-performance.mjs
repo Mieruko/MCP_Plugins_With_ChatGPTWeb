@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { executionContext } from '../dist/lib/workbench-context.js';
-import { openComputerSession, ownedComputerSession, observeComputer, actComputer, closeComputerSession } from '../dist/lib/computer-use.js';
+import { openComputerSession, ownedComputerSession, observeComputer, actComputer, closeComputerSession, leaveComputerSession, revokeComputerTask, computerSessionSummaries, computerProfilePath } from '../dist/lib/computer-use.js';
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'cu-performance-'));
 let dynamic = 0;
@@ -25,6 +25,12 @@ const site = http.createServer((req, res) => {
 await new Promise(resolve => site.listen(0, '127.0.0.1', resolve));
 const url = `http://127.0.0.1:${site.address().port}/`;
 process.env.WORKBENCH_PATH = path.join(temp, 'control');
+delete process.env.COMPUTER_BROWSER_PROFILE_PATH;
+assert.equal(computerProfilePath('any-task'), path.join(temp, 'control', 'computer-use', 'profiles', 'workbench-shared-browser'));
+process.env.COMPUTER_BROWSER_PROFILE_PATH = 'relative-profile';
+assert.throws(() => computerProfilePath(), /COMPUTER_CONFIG/);
+// Reuse a selected saved profile in place, irrespective of the calling task.
+process.env.COMPUTER_BROWSER_PROFILE_PATH = path.join(temp, 'saved-existing-profile');
 process.env.COMPUTER_USE_ENABLED = 'true';
 process.env.COMPUTER_BROWSER_HEADLESS = 'true';
 const data = r => r.structuredContent.data;
@@ -39,6 +45,7 @@ try {
     const opened = await openComputerSession('browser'); id = opened.session_id;
     assert.equal(opened.profile.persistent, true);
     const profilePath = opened.profile.path;
+    assert.equal(profilePath, process.env.COMPUTER_BROWSER_PROFILE_PATH);
     let r = await observeComputer(id, false);
     r = await actComputer(id, data(r).observation_id, {kind:'navigate',url});
     assert.ok(data(r).observation_id, JSON.stringify(r));
@@ -102,9 +109,68 @@ try {
     id = (await openComputerSession('browser')).session_id;
     let r = await observeComputer(id,false);
     r = await actComputer(id,data(r).observation_id,{kind:'navigate',url});
-    assert.match(data(r).output,/Storage EMPTY/); assert.doesNotMatch(data(r).output,/cu_saved=YES/);
-    console.log('OK another task does not inherit the saved profile');
+    assert.match(data(r).output,/Storage YES Cookie cu_saved=YES/);
+    assert.equal(computerProfilePath('profile-a'), computerProfilePath('profile-b'));
+    console.log('OK another task reuses the same persistent Workbench browser profile and login');
   });
+  await closeComputerSession(id); id = undefined;
+  const as = (owner, work, taskId = 'shared-race', workspace = temp) =>
+    executionContext.run({ ...context(taskId), sessionId: owner, workspace }, work);
+  const [openedA, openedB] = await Promise.all([
+    as('race-a', () => openComputerSession('browser')),
+    as('race-b', () => openComputerSession('browser')),
+  ]);
+  id = openedA.session_id;
+  assert.equal(openedA.session_id, openedB.session_id, 'concurrent opens launch exactly one child');
+  assert.equal(computerSessionSummaries().length, 1);
+  assert.equal(computerSessionSummaries()[0].controller_count, 2);
+  const [observedA, observedB] = await Promise.all([
+    as('race-a', () => observeComputer(id, false)),
+    as('race-b', () => observeComputer(id, false)),
+  ]);
+  assert.notEqual(data(observedA).observation_id, data(observedB).observation_id);
+  await as('race-a', () => actComputer(id, data(observedA).observation_id, { kind: 'navigate', url }));
+  await assert.rejects(as('race-b', () => actComputer(id, data(observedB).observation_id,
+    { kind: 'key', key: 'Tab' })), /COMPUTER_STALE_OBSERVATION/);
+  assert.equal((await as('race-a', () => leaveComputerSession(id))).detached, true);
+  assert.equal(computerSessionSummaries().length, 1, 'first owner leaving does not close shared browser');
+  assert.ok(data(await as('race-b', () => observeComputer(id, false))).observation_id);
+  // Exercise manual-setup promotion without opening a headed window on the
+  // user's desktop: simulate the dashboard owner on the real fixture backend.
+  const browser = await as('race-b', () => ownedComputerSession(id));
+  const originalPid = browser.transport.pid;
+  browser.manual = true;
+  browser.owner = 'local-browser-setup:shared-race';
+  browser.members.clear();
+  browser.members.set(JSON.stringify(['shared-race', path.resolve(temp).toLowerCase(), browser.owner]),
+    { taskId: 'shared-race', owner: browser.owner, workspace: temp });
+  browser.observations.clear();
+  const resumed = await as('race-b', () => openComputerSession('browser'));
+  assert.equal(resumed.session_id, id);
+  assert.equal(resumed.manual_setup, false);
+  assert.equal(browser.transport.pid, originalPid, 'reuse running browser process');
+  assert.equal(browser.members.size, 1, 'setup-only owner does not pin browser after promotion');
+  const otherWorkspace = path.join(temp, 'other-workspace');
+  await fs.mkdir(otherWorkspace);
+  const joinedForeign = await as('race-b', () => openComputerSession('browser'), 'foreign-task', otherWorkspace);
+  assert.equal(joinedForeign.session_id, id);
+  assert.equal(joinedForeign.profile.path, resumed.profile.path, 'different workspace uses identical browser profile');
+  assert.equal(computerSessionSummaries()[0].task_count, 2);
+  assert.equal(computerSessionSummaries()[0].workspace_count, 2);
+  assert.equal(computerSessionSummaries()[0].controller_count, 2, 'same owner string in another task is a separate member');
+  const foreignObserve = await as('race-b', () => observeComputer(id, false), 'foreign-task', otherWorkspace);
+  assert.ok(data(foreignObserve).observation_id);
+  await assert.rejects(as('race-a', () => observeComputer(id, false), 'foreign-task', otherWorkspace),
+    /COMPUTER_NOT_OWNED/, 'foreign task requires its own explicit open even if another task already joined');
+  revokeComputerTask('shared-race');
+  assert.equal(computerSessionSummaries().length, 1, 'revoking original task does not close foreign task browser');
+  assert.equal(computerSessionSummaries()[0].controller_count, 1);
+  await assert.rejects(as('race-b', () => observeComputer(id, false)), /COMPUTER_NOT_OWNED/);
+  assert.ok(data(await as('race-b', () => observeComputer(id, false), 'foreign-task', otherWorkspace)).observation_id);
+  await as('race-b', () => leaveComputerSession(id), 'foreign-task', otherWorkspace);
+  id = undefined;
+  assert.equal(computerSessionSummaries().length, 0);
+  console.log('OK simultaneous opens and different workspaces/tasks share one browser/profile; revoke one task retains others; manual setup promotes without respawn');
 } finally {
   if (id) await closeComputerSession(id);
   await new Promise(resolve => site.close(resolve));

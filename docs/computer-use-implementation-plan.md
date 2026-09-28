@@ -23,7 +23,7 @@ Không bao gồm trong phiên bản đầu: tự động vượt đăng nhập/2
 
 - CU là capability tùy chọn, mặc định tắt; khi bật, slim chỉ bổ sung tool CU cần thiết, không mở toàn bộ upstream.
 - Giữ nguyên quyền Ask/Auto/Full và phạm vi của task. Desktop/browser có tác động ngoài workspace; không coi một profile nằm trong workspace là sandbox OS.
-- Dùng browser profile riêng giữ đăng nhập. Mỗi profile chỉ có một controller được cấp lease; browser context/session phải gắn task và conversation phía server. Extension nối browser đang mở là tùy chọn, kiểm thử sau luồng profile riêng.
+- Dùng một browser/profile persistent chung toàn Workbench theo quyết định của chủ máy. Có thể chọn trực tiếp profile Workbench đã lưu qua `COMPUTER_BROWSER_PROFILE_PATH`. Mỗi task/conversation phải có membership được cấp quyền; mọi lệnh dùng chung một hàng đợi. Extension nối Chrome cá nhân đang mở là tùy chọn chưa triển khai.
 - Upload bằng file input/file chooser của browser trước; hộp thoại Windows là phương án tiếp theo. Phân biệt file local, Google Drive và filesystem runtime Colab.
 - Mỗi chuỗi thao tác ngắn trả observation mới. Không lấy screenshot cũ để click sau khi cửa sổ, tab, scale hoặc focus đã đổi.
 - Không dùng thời gian chờ cố định làm bằng chứng hoàn tất. Kết luận thành công cần UI state và điều kiện đầu ra của workflow cụ thể.
@@ -65,7 +65,7 @@ Phụ thuộc M1.
 - Đăng ký CU qua `src/server-factory.ts` để Workbench wrap handler; cập nhật `src/lib/tool-profile.ts` theo feature flag.
 - Khai báo capability/effects trong `src/lib/workbench.ts`, không suy quyền từ prefix hoặc upstream annotation. Capture phải kiểm tra scope riêng trước nhánh “read always allowed”.
 - Thêm CU session manager, registry backend và capability allowlist tại điểm thực thi. Kiểm tra cả `mcp_call` và proxy để không có đường raw gọi tool CU ngoài policy.
-- Browser ownership theo task/conversation và profile; desktop lease toàn máy/desktop, độc lập khóa worktree. Thu hồi lease khi stop, chuyển writer, hết hạn hoặc reconnect không xác thực được.
+- Browser membership theo task/workspace/conversation trên một profile chung; desktop lease toàn máy/desktop, độc lập khóa worktree. Thu hồi membership khi đổi policy/writer; browser đóng khi member cuối rời, hết hạn hoặc Dashboard Stop.
 - Giữ pending approval: duyệt thực thi yêu cầu gốc; không gửi lại. Nếu observation/focus đã đổi khi duyệt, trả stale-state, không click vị trí cũ.
 
 Hoàn thành khi: test Ask/Auto/Full, workspace-only, WRITER_REQUIRED, hai task và hai conversation qua dispatch thật; không lẫn phiên và không gọi raw vượt allowlist. CU tắt không sinh backend process hoặc bổ sung tool.
@@ -80,7 +80,7 @@ Phụ thuộc M2.
 - Đọc file từ execution context và chính sách hiện tại; chống path traversal, file thiếu, sai target, upload chưa hoàn tất và timeout sau side effect.
 - Tạo trang fixture local có input text, dropdown, file upload, progress và trạng thái thành công/lỗi.
 
-Hoàn thành khi: Chrome/Edge qua MCP hoàn thành form local bằng tiếng Việt, upload đúng file, xác minh kết quả; hai task không dùng nhầm profile/tab. Thử ảnh chỉ chứa mã ngẫu nhiên qua ChatGPT web để xác minh model nhận được pixels.
+Hoàn thành khi: Chrome/Edge qua MCP hoàn thành form local bằng tiếng Việt, upload đúng file, xác minh kết quả; hai task cố ý dùng cùng profile/tab nhưng không mượn membership, quyền upload hay observation của nhau. Thử ảnh chỉ chứa mã ngẫu nhiên qua ChatGPT web để xác minh model nhận được pixels.
 
 ### M4 — Windows adapter cho native dialog
 

@@ -19,6 +19,7 @@ const url = `http://127.0.0.1:${fixture.address().port}`;
 process.env.COMPUTER_USE_ENABLED = 'true';
 process.env.COMPUTER_BROWSER_HEADLESS = 'true';
 process.env.WORKBENCH_PATH = path.join(temp, 'control');
+process.env.COMPUTER_BROWSER_PROFILE_PATH = path.join(temp, 'profile');
 try {
   await executionContext.run({ taskId: 'fault-fixture', sessionId: 'fault-owner', workspace: temp,
     workspaceOnly: false, operationId: 'fault-test', capture: async () => {} }, async () => {

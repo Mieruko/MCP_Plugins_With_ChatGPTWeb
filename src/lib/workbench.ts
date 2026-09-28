@@ -13,7 +13,7 @@ import { getTaskRuntime, setTaskRuntimeProcessRole, stopTaskRuntimeProcesses } f
 import { defaultExperience, type ExperienceMode, type WriterLease } from "./experience.js";
 import { isLoopbackPortAvailable, selectPreviewPort, waitForLoopbackPortAvailable, type PortLease } from "./port-leases.js";
 import { operationMediaCache, type OperationMedia } from "./operation-media.js";
-import { COMPUTER_TOOLS, revokeComputerTask, computerSessionSummaries } from "./computer-use.js";
+import { COMPUTER_TOOLS, revokeComputerTask, computerSessionSummaries, computerMemberAttached } from "./computer-use.js";
 import {
   cancelAgentAssignment as cancelAssignment,
   claimSessionTask,
@@ -772,7 +772,7 @@ function assertControlSession(authority: ControlAuthority): Task {
 }
 
 function assertControlIdle(task: Task, sessionId: string): void {
-  if (computerSessionSummaries().some(session => session.task_id === task.id && session.owner === sessionId)) {
+  if (computerSessionSummaries().some(session => computerMemberAttached(session.session_id, task.id, sessionId))) {
     throw new Error("CONTROL_BUSY: close this conversation's Computer Use session before switching tasks.");
   }
   if (state.operations.some(op => op.sessionId === sessionId && ["pending", "running"].includes(op.status))) {

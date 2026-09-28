@@ -83,6 +83,7 @@ export function createWorkbenchRouter(options: { sessionList?: () => McpSessionS
       jobs.push(...listed.map(job => ({ ...job, task_id: task.id })));
     }
     return { enabled: computerEnabled(), windows_enabled: process.env.COMPUTER_WINDOWS_ENABLED === "true",
+      shared_profile: { scope: "workbench", path: computerProfilePath() },
       profiles: (await getWorkbench()).tasks.filter(task => ["open", "blocked", "ready_to_merge"].includes(task.lifecycle)).map(task => ({ task_id: task.id,
         title: task.title, workspace_id: task.workspaceId, path: computerProfilePath(task.id) })),
       sessions: computerSessionSummaries(), jobs: jobs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 50) };
