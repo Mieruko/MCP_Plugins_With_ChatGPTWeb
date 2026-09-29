@@ -1,7 +1,7 @@
 {
   "name": "chatgpt-local-coder",
-  "version": "1.0.1",
-  "description": "Turn ChatGPT web into a local coding agent via MCP — files, shell, git, apply_patch, 40+ tools",
+  "version": "2.0.0",
+  "description": "Self-hosted MCP Workbench for ChatGPT Web — files, shell, Git, Computer Use, 40+ tools",
   "repository": {
     "type": "git",
     "url": "https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git"
@@ -49,6 +49,8 @@
     "filesystem",
     "git",
     "apply-patch",
+    "computer-use",
+    "browser-automation",
     "developer-mode",
     "openai-tunnel"
   ],

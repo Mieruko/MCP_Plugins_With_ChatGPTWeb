@@ -1,14 +1,14 @@
 <div align="center">
 
-# MCP Plugins With ChatGPT Web · V1.0.1
+# MCP Plugins With ChatGPT Web · V2.0.0
 
-**A self-hosted local coding Workbench that connects ChatGPT Web to your machine through MCP.**
+**A self-hosted local coding Workbench that connects ChatGPT Web to your machine through MCP, including Computer Use.**
 
 **Start with Basic — the recommended experience for everyday coding.**
 
-[Download V1.0.1](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/releases/tag/v1.0.1) · [Release notes](docs/releases/v1.0.1.md)
+[Download V2.0.0](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/releases/tag/v2.0.0) · [Release notes](docs/releases/v2.0.0.md)
 
-Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Diff · Checkpoints · Upstream MCP
+Computer Use · Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Diff · Checkpoints · Upstream MCP
 
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io)
 [![ChatGPT](https://img.shields.io/badge/ChatGPT-Web-10a37f?style=flat-square)](https://chatgpt.com)
@@ -16,7 +16,7 @@ Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Di
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Mieruko/MCP_Plugins_With_ChatGPTWeb?style=flat-square&logo=github)](https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb/stargazers)
 
-[Quick Start](#quick-start) · [Recommended tunnel setup](#option-2-setup) · [Workbench](#workbench) · [ChatGPT](#connect-chatgpt) · [GitHub](#github-integration) · [Security](#permissions-and-security) · [Upstream](#upstream-and-project-history)
+[Quick Start](#quick-start) · [Computer Use](#computer-use-for-chatgpt-web) · [Recommended tunnel setup](#option-2-setup) · [Workbench](#workbench) · [ChatGPT](#connect-chatgpt) · [GitHub](#github-integration) · [Security](#permissions-and-security) · [Upstream](#upstream-and-project-history)
 
 </div>
 
@@ -24,7 +24,7 @@ Files · Shell · Git · GitHub · Multi-workspace · Active Agents · Review/Di
 
 ## About this project
 
-Version 1 brings Basic project workflows, Advanced task/worktree coordination, persistent handoffs, bounded MCP history and optional permission changes from chat into one release. Basic is the default for new projects and is recommended unless you need parallel tasks and a merge queue.
+Version 2 adds opt-in Computer Use for ChatGPT Web: ChatGPT can observe and operate a Workbench-managed Chrome or Edge session through permission-checked MCP tools. Basic project workflows, Advanced task/worktree coordination, persistent handoffs and review remain part of the Workbench. Basic is the default for new projects and is recommended unless you need parallel tasks and a merge queue.
 
 **MCP Plugins With ChatGPT Web** turns ChatGPT Web into a local coding agent while keeping the project, terminal, Git state and approval flow on your own computer.
 
@@ -41,6 +41,8 @@ The current project adds and develops features such as:
 - Codex-style review and colored unified diffs;
 - operation history, checkpoints, Undo/Redo and rewind compatibility;
 - foreground shell and managed background processes;
+- Computer Use tools for a persistent Workbench-managed browser, with bounded browser jobs and file uploads;
+- an optional Windows native UI backend for foreground desktop controls;
 - structured Git controls for status, diff, staging, commit, branches, worktrees, fetch, pull and push;
 - GitHub PR / Issue / Checks integration through GitHub CLI;
 - upstream MCP server discovery and proxying;
@@ -49,6 +51,35 @@ The current project adds and develops features such as:
 - local admin/control APIs protected from non-local access.
 
 The Workbench and MCP server use the same underlying task, permission and tool execution model rather than maintaining two independent implementations.
+
+## Computer Use for ChatGPT Web
+
+Computer Use is new in **v2.0.0**. It gives ChatGPT Web five scoped MCP tools to open a managed browser session, inspect the page, navigate and interact with visible controls, upload files, and track a bounded browser workflow. The browser backend supports Chrome and Edge through the optional Playwright MCP dependency.
+
+Computer Use is **disabled by default**. Install optional dependencies and build the project:
+
+```powershell
+npm install --include=optional
+npm run build
+```
+
+Then add these settings to `.env` and restart the server after active tasks have ended:
+
+```dotenv
+COMPUTER_USE_ENABLED=true
+COMPUTER_BROWSER=chrome
+COMPUTER_BROWSER_HEADLESS=false
+```
+
+In the Workbench, open **Computer Use**, choose the task, and open its browser to sign in yourself. ChatGPT Web can attach to that same session with `computer_session(action=open,backend=browser)`. The session follows the task's permission policy and requires machine scope. You handle sign-in, two-factor prompts and CAPTCHAs.
+
+The managed browser uses a persistent profile and does not import your personal Chrome or Edge profile. All authorized tasks and workspaces on the same Workbench server share that browser, its tabs and its cookies; it is not a boundary between projects. Review the [Computer Use guide](docs/computer-use.md) before using accounts or uploading local files.
+
+Browser jobs can poll for visible page evidence, but a matching page message does not prove that an external service completed an action. Review the destination and result yourself before treating a workflow as complete or retrying a submission.
+
+### Optional Windows desktop backend
+
+Windows native UI control is a separate opt-in backend. It requires Windows and `uv`, uses a private Python environment, and targets the foreground application. The screenshot may still include the full desktop. Real desktop application workflows have not been validated; see the [implementation verification record](docs/computer-use-verification.md) for tested coverage and open gaps.
 
 ## Star History
 
@@ -82,7 +113,9 @@ The Workbench and MCP server use the same underlying task, permission and tool e
 
 ## Requirements
 
-- Node.js 22+ recommended for v1 (the release test environment uses Node.js 22);
+- Node.js 22+ (npm is included with Node.js);
+- Chrome or Edge for browser Computer Use; this is optional and disabled by default;
+- Windows and `uv` only for the optional Windows native UI backend;
 - npm;
 - Git for Git features;
 - GitHub CLI (`gh`) for GitHub PR / Issue features;
@@ -96,7 +129,7 @@ Clone **this fork**:
 ```powershell
 git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
 cd MCP_Plugins_With_ChatGPTWeb
-git checkout v1.0.1
+git checkout v2.0.0
 npm ci
 npm run setup
 npm start
@@ -179,7 +212,7 @@ For a new installation:
 ```powershell
 git clone https://github.com/Mieruko/MCP_Plugins_With_ChatGPTWeb.git
 cd MCP_Plugins_With_ChatGPTWeb
-git checkout v1.0.1
+git checkout v2.0.0
 npm ci
 npm run setup
 ```
@@ -245,7 +278,7 @@ For an existing checkout, preserve `.env`, back up the configured `WORKBENCH_PAT
 
 ```powershell
 git fetch origin --tags
-git checkout v1.0.1
+git checkout v2.0.0
 npm ci
 npm run build
 npm start
