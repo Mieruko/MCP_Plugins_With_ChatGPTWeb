@@ -61,9 +61,12 @@ async function readTextLimited(
   kind: ProjectMemorySection["kind"]
 ): Promise<ProjectMemorySection | null> {
   try {
-    const buf = await fs.readFile(await validatePath(filePath));
+    // Only user-level instruction files (and their explicit @imports) may be
+    // read outside the task workspace. Project files still use validatePath.
+    const trustedUserFile = kind === "user";
+    const buf = await readInstructionFile(filePath, trustedUserFile);
     let full = stripHtmlComments(buf.toString("utf-8"));
-    full = await expandImportsInContent(full, path.dirname(filePath));
+    full = await expandImportsInContent(full, path.dirname(filePath), trustedUserFile);
 
     const lines = full.split(/\r?\n/).slice(0, maxLines);
     const lineLimited = lines.join("\n");
@@ -83,16 +86,21 @@ async function readTextLimited(
   }
 }
 
-async function expandImportsInContent(content: string, baseDir: string): Promise<string> {
+async function readInstructionFile(filePath: string, trustedUserFile: boolean): Promise<Buffer> {
+  return fs.readFile(trustedUserFile ? filePath : await validatePath(filePath));
+}
+
+async function expandImportsInContent(content: string, baseDir: string, trustedUserFile: boolean): Promise<string> {
   const visited = new Set<string>();
-  return expandMemoryImportsAsync(content, baseDir, visited, 0);
+  return expandMemoryImportsAsync(content, baseDir, visited, 0, trustedUserFile);
 }
 
 async function expandMemoryImportsAsync(
   content: string,
   baseDir: string,
   visited: Set<string>,
-  depth: number
+  depth: number,
+  trustedUserFile: boolean
 ): Promise<string> {
   if (depth >= IMPORT_MAX_DEPTH) return content;
 
@@ -132,13 +140,14 @@ async function expandMemoryImportsAsync(
 
     visited.add(resolved);
     try {
-      const buf = await fs.readFile(await validatePath(resolved));
+      const buf = await readInstructionFile(resolved, trustedUserFile);
       const imported = stripHtmlComments(buf.toString("utf-8"));
       const expanded = await expandMemoryImportsAsync(
         imported,
         path.dirname(resolved),
         visited,
-        depth + 1
+        depth + 1,
+        trustedUserFile
       );
       out.push(`<!-- @import ${resolved} -->`, expanded);
     } catch {
@@ -199,7 +208,7 @@ async function appendSection(
 
 export async function loadProjectMemory(
   workspaceRoot: string,
-  opts?: { maxBytes?: number; maxLines?: number; workspaceRoots?: string[] }
+  opts?: { maxBytes?: number; maxLines?: number; workspaceRoots?: string[]; userMemoryCandidates?: readonly string[] }
 ): Promise<ProjectMemoryBundle> {
   const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxLines = opts?.maxLines ?? DEFAULT_MAX_LINES;
@@ -208,7 +217,7 @@ export async function loadProjectMemory(
   const sections: ProjectMemorySection[] = [];
   const totalBytes = { value: 0 };
 
-  for (const userPath of USER_MEMORY_CANDIDATES) {
+  for (const userPath of opts?.userMemoryCandidates ?? USER_MEMORY_CANDIDATES) {
     if (!(await fileExists(userPath))) continue;
     await appendSection(sections, totalBytes, maxBytes, maxLines, userPath, "user");
     break;

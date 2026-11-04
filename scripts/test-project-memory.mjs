@@ -6,6 +6,13 @@ import {
   buildInstructionContext,
   summarizeInstructionContext,
 } from "../dist/lib/instruction-context.js";
+import { loadProjectMemory } from "../dist/lib/project-memory.js";
+import { executionContext } from "../dist/lib/workbench-context.js";
+import { validatePath } from "../dist/lib/path-security.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import assert from "node:assert/strict";
 
 const workspaceRoot = process.env.WORKSPACE_PATH || process.cwd();
 let passed = 0;
@@ -61,6 +68,38 @@ try {
   console.log("Memory files:", ctx.projectMemory.sections.map((s) => s.path).join(", ") || "(none)");
 } catch (err) {
   fail("buildInstructionContext", err.message || err);
+}
+
+const fixture = await fs.mkdtemp(path.join(os.tmpdir(), "local-coder-global-memory-"));
+try {
+  const workspace = path.join(fixture, "workspace");
+  const homeConfig = path.join(fixture, "global-instructions");
+  await fs.mkdir(workspace);
+  await fs.mkdir(homeConfig);
+  const userFile = path.join(homeConfig, "CLAUDE.md");
+  await fs.writeFile(userFile, "global instruction loaded\n@./extra.md\n");
+  await fs.writeFile(path.join(homeConfig, "extra.md"), "imported user instructions loaded\n");
+  await fs.writeFile(path.join(fixture, "private.txt"), "not allowed through project imports\n");
+  await fs.writeFile(path.join(workspace, "CLAUDE.md"), "project instructions\n@../private.txt\n");
+
+  await executionContext.run({
+    taskId: "test", workspace, workspaceOnly: true,
+    operationId: "test", capture: async () => {},
+  }, async () => {
+    await assert.rejects(validatePath(userFile), /outside this task's workspace/);
+    const result = await loadProjectMemory(workspace, { userMemoryCandidates: [userFile] });
+    assert.equal(result.sections[0].kind, "user");
+    assert.match(result.sections[0].content, /global instruction loaded/);
+    assert.match(result.sections[0].content, /imported user instructions loaded/);
+    assert.match(result.sections[1].content, /project instructions/);
+    assert.match(result.sections[1].content, /import failed/);
+    assert.doesNotMatch(result.sections[1].content, /not allowed through project imports/);
+  });
+  ok("workspace-only initialization loads global instructions and imports without exposing external project files");
+} catch (err) {
+  fail("workspace-only global memory", err.message || err);
+} finally {
+  await fs.rm(fixture, { recursive: true, force: true });
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
